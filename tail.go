@@ -162,9 +162,10 @@ func (p *Poller) reopenForever() (f *os.File, closed bool) {
 			return f, p.replaceFileOrClose(f)
 		}
 
-		_, err = f.Seek(0, p.c.Whence)
+		n, err := f.Seek(0, p.c.Whence)
 		if err == nil {
 			p.c.Whence = io.SeekStart
+			p.bytesRead = n
 			return f, p.replaceFileOrClose(f)
 		}
 
@@ -190,6 +191,7 @@ func (p *Poller) replaceFileOrClose(f *os.File) (closed bool) {
 			oldF.Close()
 		}
 		p.f = f
+		p.bytesRead = 0
 	}
 	return p.closed
 }

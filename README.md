@@ -33,3 +33,5 @@ to adding it some day.
 * File checkpoints for resuming on restart
 * Readline implementation that can provide line aligned checkpoints.
 * More thorough testing 
+    * Test seeking
+    * Test correct offset tracking
