@@ -25,6 +25,11 @@ type PollerConfig struct {
 	// OnError may be nil. If so, the error is ignored and polling starts over
 	// and tries forever. It is safe to call Close() on the poller in the handler.
 	OnError ErrorHandler
+
+	// Whence can be set to one of the Seek constants from the IO package.
+	// It only applies to the first file opened, as subsequent files will always be
+	// read from the beginning. io.SeekCurrent will behave the same as io.SeedStart.
+	Whence int
 }
 
 func NewPoller(c PollerConfig) Tailer {
@@ -153,7 +158,13 @@ func (p *Poller) getFile() (f *os.File, closed bool) {
 func (p *Poller) reopenForever() (f *os.File, closed bool) {
 	for {
 		f, err := os.Open(p.c.FilePath)
+		if err == nil && p.c.Whence == io.SeekStart {
+			return f, p.replaceFileOrClose(f)
+		}
+
+		_, err = f.Seek(0, p.c.Whence)
 		if err == nil {
+			p.c.Whence = io.SeekStart
 			return f, p.replaceFileOrClose(f)
 		}
 
