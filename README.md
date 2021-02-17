@@ -16,6 +16,8 @@ want to consume it over a channel. Instead, implementations in this module expos
 file tailing as a simple io.ReadCloser that never reaches EOF, transparently
 consuming files as they are rotated.
 
+gotail will NOT work correctly on files that are truncated.
+
 Polling may be excessive for some applications. This module was designed with
 large and frequently written log files in mind, such as edge proxy logs.
 
