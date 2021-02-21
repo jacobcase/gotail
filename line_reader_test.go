@@ -13,24 +13,24 @@ func TestLineReader(t *testing.T) {
 		p int64
 	}
 
-	h := NewRotaterHarness(t, "line-reader-test")
+	h := NewWatcherHarness(t, "line-reader-test")
 
-	c := PollerConfig{
+	c := Config{
 		Path:     h.Path(),
 		Interval: time.Millisecond * 50,
 	}
 
-	p, err := NewPollingRotater(c)
+	onErr := func(e error) error {
+		t.Fatal(e)
+		return e
+	}
+
+	r, err := NewLineReader(c, onErr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer p.Close()
 
-	onErr := func(e error) {
-		t.Fatal(e)
-	}
-
-	r := NewLineReader(p, onErr)
+	defer r.Close()
 
 	writer := h.Create()
 	writeString(t, writer, "hello\nworld\r\n!\n\n!\n")

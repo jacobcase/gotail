@@ -9,40 +9,10 @@ import (
 	"time"
 )
 
-type WaitStatus struct {
-	State    FileState
-	File     *os.File
-	ReOpened bool
-}
+var _ Watcher = (*pollWatcher)(nil)
 
-type Rotater interface {
-	Wait() (s WaitStatus, closed bool, err error)
-	Close() error
-}
-
-type PollerConfig struct {
-	// Path should be the location to a regular file. This value is
-	// not validated and is passed directly to os.Open().
-	Path string
-
-	// Interval is how frequently to stat the file and check for more data.
-	Interval time.Duration
-
-	// FirstWhence can be set to one of the Seek constants from the IO package.
-	// It only applies to the first file opened, as subsequent files will always be
-	// read from the beginning. io.SeekCurrent will behave the same as io.SeekStart.
-	// This will also be disregarded if the file doesn't initially exist on disk.
-	FirstWhence int
-
-	// StartState is optional for resuming the first file opened from where it left
-	// off if the FileState matches.
-	StartState *FileState
-}
-
-var _ Rotater = (*PollingRotater)(nil)
-
-type PollingRotater struct {
-	c PollerConfig
+type pollWatcher struct {
+	c Config
 
 	timer *time.Timer
 	f     *os.File
@@ -53,11 +23,14 @@ type PollingRotater struct {
 	mu sync.Mutex
 }
 
-func NewPollingRotater(c PollerConfig) (*PollingRotater, error) {
-	if !(c.FirstWhence == io.SeekStart ||
-		c.FirstWhence == io.SeekCurrent ||
-		c.FirstWhence == io.SeekEnd) {
-		return nil, fmt.Errorf("config value for whence of %v is invalid", c.FirstWhence)
+// NewPollingWatcher configures a Watcher that uses file polling
+// to determine when there is more data to read. It doesn't support
+// files that were truncated, and only supports regular files (no pipes).
+func NewPollingWatcher(c Config) (Watcher, error) {
+	if !(c.Whence == io.SeekStart ||
+		c.Whence == io.SeekCurrent ||
+		c.Whence == io.SeekEnd) {
+		return nil, fmt.Errorf("config value for whence of %v is invalid", c.Whence)
 	}
 
 	if c.Interval < 0 {
@@ -70,7 +43,7 @@ func NewPollingRotater(c PollerConfig) (*PollingRotater, error) {
 		return nil, errors.New("config value for path cannot be empty")
 	}
 
-	p := &PollingRotater{
+	p := &pollWatcher{
 		c:      c,
 		timer:  time.NewTimer(0),
 		cancel: make(chan struct{}),
@@ -80,7 +53,7 @@ func NewPollingRotater(c PollerConfig) (*PollingRotater, error) {
 	return p, nil
 }
 
-func (p *PollingRotater) Wait() (s WaitStatus, closed bool, err error) {
+func (p *pollWatcher) Wait() (s WaitStatus, closed bool, err error) {
 	p.mu.Lock()
 	defer func() {
 		if !p.timer.Stop() {
@@ -109,7 +82,7 @@ func (p *PollingRotater) Wait() (s WaitStatus, closed bool, err error) {
 		if p.f == nil {
 			f, err := p.openAndSeek()
 			if os.IsNotExist(err) {
-				p.c.FirstWhence = io.SeekStart
+				p.c.Whence = io.SeekStart
 				continue
 			}
 
@@ -175,7 +148,7 @@ func (p *PollingRotater) Wait() (s WaitStatus, closed bool, err error) {
 	}
 }
 
-func (p *PollingRotater) openAndSeek() (f *os.File, err error) {
+func (p *pollWatcher) openAndSeek() (f *os.File, err error) {
 	f, err = os.Open(p.c.Path)
 	if err != nil {
 		return nil, err
@@ -189,20 +162,20 @@ func (p *PollingRotater) openAndSeek() (f *os.File, err error) {
 		}
 
 		p.c.StartState = nil
-		p.c.FirstWhence = io.SeekStart
-	} else if p.c.FirstWhence != io.SeekStart {
-		_, err = f.Seek(0, p.c.FirstWhence)
+		p.c.Whence = io.SeekStart
+	} else if p.c.Whence != io.SeekStart {
+		_, err = f.Seek(0, p.c.Whence)
 		if err != nil {
 			f.Close()
 			return nil, err
 		}
-		p.c.FirstWhence = io.SeekStart
+		p.c.Whence = io.SeekStart
 	}
 
 	return f, nil
 }
 
-func (p *PollingRotater) Close() error {
+func (p *pollWatcher) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.closed {

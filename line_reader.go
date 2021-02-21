@@ -7,12 +7,15 @@ import (
 	"time"
 )
 
-type ErrorHandler func(err error)
-
+// LineReader provides a way to transparently read
+// \n or \r\n delimited lines across multiple files.
+// The only method that is safe to call in parallel
+// to other methods is Close().
 type LineReader struct {
 	onErr ErrorHandler
+	c     Config
 
-	r Rotater
+	r Watcher
 
 	s  WaitStatus
 	br *bufio.Reader
@@ -20,17 +23,34 @@ type LineReader struct {
 	lastBytes []byte
 
 	stop chan struct{}
+
+	err error
 }
 
-func NewLineReader(r Rotater, errHandler ErrorHandler) *LineReader {
+// NewLineReader returns a LineReader that has an underlying
+// Watcher created from c and will run unexpected errors through
+// ErrorHandler h. If the error is an EOF or file not found error,
+// it will not be passed to the error handler. If h is nil,
+// errors will be ignored and will automatically retry.
+func NewLineReader(c Config, h ErrorHandler) (*LineReader, error) {
+	if h == nil {
+		h = DiscardErrorHandler
+	}
+
+	r, err := NewPollingWatcher(c)
+	if err != nil {
+		return nil, err
+	}
+
 	return &LineReader{
-		onErr: errHandler,
+		onErr: h,
 		r:     r,
+		c:     c,
 		// An empty reader makes it safe to read and cause the
 		// Next loop to start trying to open the file.
 		br:   bufio.NewReader(bytes.NewReader(nil)),
 		stop: make(chan struct{}),
-	}
+	}, nil
 }
 
 func (l *LineReader) sleep(t time.Duration) bool {
@@ -57,17 +77,23 @@ func (l *LineReader) Next() bool {
 
 	l.lastBytes = nil
 
-	for l.sleep(sleepTime) {
-		sleepTime = time.Second
+	for {
+		if l.err != nil || !l.sleep(sleepTime) {
+			return false
+		}
+
+		sleepTime = l.c.Interval
 
 		tb, err := l.br.ReadBytes('\n')
 		l.s.State.Position += int64(len(tb))
 
-		// Avoid an allocation if lastBytes is nil.
-		if l.lastBytes != nil {
-			l.lastBytes = append(l.lastBytes, tb...)
-		} else {
-			l.lastBytes = tb
+		if len(tb) > 0 {
+			// Avoid an allocation if lastBytes is nil.
+			if l.lastBytes != nil {
+				l.lastBytes = append(l.lastBytes, tb...)
+			} else {
+				l.lastBytes = tb
+			}
 		}
 
 		if err == nil {
@@ -75,12 +101,17 @@ func (l *LineReader) Next() bool {
 		}
 
 		if err != io.EOF {
-			l.onErr(err)
+			l.err = l.onErr(err)
 			sleepTime = time.Second
 			continue
 		}
 
 		// The error was an EOF, so wait for more data.
+		if l.c.StopAtEOF {
+			l.err = err
+			continue
+		}
+
 		s, closed, err := l.r.Wait()
 		if closed {
 			return false
@@ -89,7 +120,7 @@ func (l *LineReader) Next() bool {
 		l.s = s
 
 		if err != nil {
-			l.onErr(err)
+			l.err = l.onErr(err)
 			sleepTime = time.Second
 			continue
 		}
@@ -120,6 +151,14 @@ func (l *LineReader) Bytes() []byte {
 	return l.lastBytes
 }
 
+// Err returns any error that occurred that caused Next to
+// return false. If it's set, it will generally be what was
+// returned by the ErrorHandler.
+func (l *LineReader) Err() error {
+	return l.err
+}
+
+// Close cleans up any resources and should only be called once.
 func (l *LineReader) Close() error {
 	select {
 	case <-l.stop:

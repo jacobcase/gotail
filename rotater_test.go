@@ -48,16 +48,16 @@ func (l fileList) Name() string {
 	return l.name
 }
 
-type RotaterHarness struct {
+type WatcherHarness struct {
 	files fileList
 	t     *testing.T
 	path  string
 }
 
-func NewRotaterHarness(t *testing.T, name string) *RotaterHarness {
+func NewWatcherHarness(t *testing.T, name string) *WatcherHarness {
 	p := filepath.Join(t.TempDir(), name)
 
-	r := &RotaterHarness{
+	r := &WatcherHarness{
 		t:     t,
 		path:  p,
 		files: newFileList(p),
@@ -66,42 +66,42 @@ func NewRotaterHarness(t *testing.T, name string) *RotaterHarness {
 	return r
 }
 
-func (r *RotaterHarness) Path() string {
+func (r *WatcherHarness) Path() string {
 	return r.path
 }
 
-func (r *RotaterHarness) cleanup() {
+func (r *WatcherHarness) cleanup() {
 	r.t.Helper()
 	if err := r.files.removeAll(); err != nil {
 		r.t.Fatal(err)
 	}
 }
 
-func (h *RotaterHarness) Wait(r Rotater, reOpened bool, closed bool, err error) *os.File {
+func (h *WatcherHarness) Wait(r Watcher, reOpened bool, closed bool, err error) *os.File {
 	h.t.Helper()
 	s, c, e := r.Wait()
 	if e != err {
-		h.t.Fatalf("rotater returned %v for error, expected %v", e, err)
+		h.t.Fatalf("watcher returned %v for error, expected %v", e, err)
 	}
 
 	if c != closed {
-		h.t.Fatalf("rotater returned %v for closed, expected %v", c, closed)
+		h.t.Fatalf("watcher returned %v for closed, expected %v", c, closed)
 	}
 
 	if s.ReOpened != reOpened {
-		h.t.Fatalf("rotater returned %v for new file, expected %v", s.ReOpened, reOpened)
+		h.t.Fatalf("watcher returned %v for new file, expected %v", s.ReOpened, reOpened)
 	}
 
 	return s.File
 }
 
-func (h *RotaterHarness) Rotate() {
+func (h *WatcherHarness) Rotate() {
 	if err := h.files.push(); err != nil {
 		h.t.Fatal(err)
 	}
 }
 
-func (h *RotaterHarness) Create() *os.File {
+func (h *WatcherHarness) Create() *os.File {
 	f, err := os.OpenFile(h.files.Name(), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0644)
 	if err != nil {
 		h.t.Fatal(err)
@@ -138,16 +138,16 @@ func writeString(t *testing.T, w io.Writer, s string) {
 	}
 }
 
-func TestReadAfterRotate(t *testing.T) {
+func TestReadAfterWatcher(t *testing.T) {
 
-	h := NewRotaterHarness(t, "write-after-rotate")
+	h := NewWatcherHarness(t, "write-after-rotate")
 
-	c := PollerConfig{
+	c := Config{
 		Path:     h.Path(),
 		Interval: time.Millisecond * 50,
 	}
 
-	r, err := NewPollingRotater(c)
+	r, err := NewPollingWatcher(c)
 	if err != nil {
 		t.Fatal(err)
 	}
