@@ -46,10 +46,7 @@ func NewLineReader(c Config, h ErrorHandler) (*LineReader, error) {
 		onErr: h,
 		r:     r,
 		c:     c,
-		// An empty reader makes it safe to read and cause the
-		// Next loop to start trying to open the file.
-		br:   bufio.NewReader(bytes.NewReader(nil)),
-		stop: make(chan struct{}),
+		stop:  make(chan struct{}),
 	}, nil
 }
 
@@ -78,21 +75,28 @@ func (l *LineReader) Next() bool {
 	l.lastBytes = nil
 
 	for {
+		var b []byte
+		var err error
+
 		if l.err != nil || !l.sleep(sleepTime) {
 			return false
 		}
 
 		sleepTime = l.c.Interval
 
-		tb, err := l.br.ReadBytes('\n')
-		l.s.State.Position += int64(len(tb))
+		if l.br == nil {
+			goto Wait
+		}
 
-		if len(tb) > 0 {
+		b, err = l.br.ReadBytes('\n')
+		l.s.State.Position += int64(len(b))
+
+		if len(b) > 0 {
 			// Avoid an allocation if lastBytes is nil.
 			if l.lastBytes != nil {
-				l.lastBytes = append(l.lastBytes, tb...)
+				l.lastBytes = append(l.lastBytes, b...)
 			} else {
-				l.lastBytes = tb
+				l.lastBytes = b
 			}
 		}
 
@@ -112,6 +116,7 @@ func (l *LineReader) Next() bool {
 			continue
 		}
 
+	Wait:
 		s, closed, err := l.r.Wait()
 		if closed {
 			return false

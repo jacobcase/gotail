@@ -1,6 +1,7 @@
 package tail
 
 import (
+	"io"
 	"reflect"
 	"testing"
 	"time"
@@ -16,8 +17,9 @@ func TestLineReader(t *testing.T) {
 	h := NewWatcherHarness(t, "line-reader-test")
 
 	c := Config{
-		Path:     h.Path(),
-		Interval: time.Millisecond * 50,
+		Path:      h.Path(),
+		Interval:  time.Millisecond * 50,
+		StopAtEOF: true,
 	}
 
 	onErr := func(e error) error {
@@ -29,8 +31,6 @@ func TestLineReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	defer r.Close()
 
 	writer := h.Create()
 	writeString(t, writer, "hello\nworld\r\n!\n\n!\n")
@@ -60,19 +60,45 @@ func TestLineReader(t *testing.T) {
 	}
 
 	actual := []line{}
+	var cnt int
+	for r.Next() {
+		cnt++
+		actual = append(actual, line{
+			s: string(r.Bytes()),
+			p: r.FileState().Position,
+		})
+		if cnt == 3 {
+			break
+		}
+	}
+
+	if r.Err() != nil {
+		t.Fatalf("unexpected line reader error: %v", r.Err())
+	}
+
+	r.Close()
+	info := r.FileState()
+
+	c.StartState = &info
+	r, err = NewLineReader(c, onErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	for r.Next() {
 		actual = append(actual, line{
 			s: string(r.Bytes()),
 			p: r.FileState().Position,
 		})
+	}
 
-		if len(actual) == 5 {
-			break
-		}
+	if r.Err() != io.EOF {
+		t.Fatalf("unexpected line reader error: %v", r.Err())
 	}
 
 	if !reflect.DeepEqual(expected, actual) {
 		t.Fatalf("expected %v doesn't match actual %v", expected, actual)
 	}
+	r.Close()
 
 }
