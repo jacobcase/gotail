@@ -90,6 +90,7 @@ func (p *pollWatcher) Wait() (s WaitStatus, closed bool, err error) {
 				return s, p.closed, err
 			}
 
+			// TODO: refactor openAndSeek to provide this.
 			s.State, err = NewFileState(f)
 			if err != nil {
 				return s, p.closed, err
@@ -120,7 +121,7 @@ func (p *pollWatcher) Wait() (s WaitStatus, closed bool, err error) {
 			continue
 		} else if os.IsNotExist(err) {
 			continue
-		} else {
+		} else if err != nil {
 			return s, false, err
 		}
 

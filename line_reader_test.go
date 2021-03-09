@@ -7,14 +7,14 @@ import (
 	"time"
 )
 
-func TestLineReader(t *testing.T) {
+func TestLineReaderResume(t *testing.T) {
 
 	type line struct {
 		s string
 		p int64
 	}
 
-	h := NewWatcherHarness(t, "line-reader-test")
+	h := NewWatcherHarness(t, "line-reader-resume-test")
 
 	c := Config{
 		Path:      h.Path(),
@@ -100,5 +100,49 @@ func TestLineReader(t *testing.T) {
 		t.Fatalf("expected %v doesn't match actual %v", expected, actual)
 	}
 	r.Close()
+}
 
+func readLine(t *testing.T, r *LineReader, expect string) {
+	if !r.Next() {
+		if r.Err() != nil {
+			t.Fatalf("unexpected error: %v", r.Err())
+		} else {
+			t.Fatal("Next() returned false when expecting more data")
+		}
+	}
+
+	if expect != string(r.Bytes()) {
+		t.Fatalf("expected line '%v' doesn't match actual '%v'", expect, string(r.Bytes()))
+	}
+}
+
+func TestLineReaderRotate(t *testing.T) {
+
+	h := NewWatcherHarness(t, "line-reader-resume-test")
+
+	c := Config{
+		Path:     h.Path(),
+		Interval: time.Millisecond * 50,
+	}
+
+	r, err := NewLineReader(c, func(e error) error {
+		t.Fatal(e)
+		return e
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writer := h.Create()
+	writeString(t, writer, "file1\n")
+	writer.Close()
+
+	readLine(t, r, "file1")
+
+	h.Rotate()
+	writer = h.Create()
+	writeString(t, writer, "file2\n")
+	writer.Close()
+
+	readLine(t, r, "file2")
 }
