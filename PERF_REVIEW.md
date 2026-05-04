@@ -24,10 +24,10 @@ Tests pass cleanly (`go test -count=1 -short ./watch/... ./tail/... ./forward/..
 | M6 — `time.After` → `time.NewTimer` | **DONE** | `45e13fb` |
 | M7 — `RecordingSink.All` preallocation | **DONE** | `877e5d6` |
 | L1 — `openFirst` switch → if/else | **DONE** (incidental in H3 rewrite) | `45e13fb` |
-| L2 — `Logrotate.Enumerate` redundant `HasPrefix` | open | — |
-| L3 — `MemorySource` naming collision | open | — |
-| L4 — `maxMetaBytes` check before marshal | open | — |
-| L5 — `cmd/gotail` two writes per record | open | — |
+| L2 — `Logrotate.Enumerate` redundant `HasPrefix` | **DONE** | _pending_ |
+| L3 — `MemorySource` naming collision | **DONE** | _pending_ |
+| L4 — `maxMetaBytes` check before marshal | **DONE** (renamed to `maxRawMetaBytes`) | _pending_ |
+| L5 — `cmd/gotail` two writes per record | **WONTFIX** — plumbing `KeepNewline` through `tail.Options` costs more than the gain (writes already coalesce through `bufio.Writer`) | — |
 
 ---
 
@@ -267,11 +267,15 @@ as an `if/else`. Stylistic only.
 
 ### L2. `Logrotate.Enumerate`'s redundant `HasPrefix` check
 
+> **DONE.** Removed; `filepath.Glob(s.activePath + ".*")` already guarantees the prefix.
+
 `tail/source.go:255`: `if !strings.HasPrefix(p, prefix)` —
 `filepath.Glob(s.activePath + ".*")` already guarantees the prefix.
 Defensive but redundant.
 
 ### L3. `tail.MemorySource` (frozen-slice constructor) vs `tailtest.MemorySource` (mutable)
+
+> **DONE.** Renamed `tail.MemorySource` → `tail.StaticSource` (matching the godoc, which already described it as "fixed, immutable"). `tailtest.MemorySource` keeps its name — it's the mutating one.
 
 Two types named `MemorySource` in two packages. Today this works but it's
 a footgun in test imports. Consider `tail.StaticSource` or similar for the
@@ -279,12 +283,16 @@ immutable one. (Public API change — only worth doing pre-1.0.)
 
 ### L4. `cursor.go:131-133` — `maxMetaBytes` enforced before marshal
 
+> **DONE.** Renamed constant to `maxRawMetaBytes` with a doc comment clarifying that the limit is on user-supplied raw JSON, not the wrapping envelope. Error message updated to say "raw meta size". The pre-marshal check is the right place — running marshal just to reject would burn the work.
+
 `Save` checks `len(cp.Meta) > maxMetaBytes` *before* marshalling, but the
 limit really applies to the raw user-supplied JSON, not the wrapping
 envelope. Either rename to `maxRawMetaBytes` to clarify intent, or move the
 check post-marshal against the full payload.
 
 ### L5. `cmd/gotail/main.go:74-75` — two writes per record
+
+> **WONTFIX.** The "fix" would require plumbing `KeepNewline` through `tail.Options` → `watch.LineOptions` (currently hardcoded `false`) — a meaningful surface-area change for zero observable gain. Both writes go through `bufio.Writer`, so there's no syscall difference. Closing as not worth the API cost.
 
 `out.Write(rec.Line)` then `out.WriteByte('\n')`. Through `bufio.Writer`
 this is fine (no syscall coalescing concern). Could enable `KeepNewline`
@@ -347,12 +355,13 @@ is the right call.
 
 ## Outcome
 
-All H- and M-tier items shipped across two commits:
+All in-scope items addressed across three implementation commits plus this doc:
 
 - `45e13fb` — H1, H2, H3, H4, H5, H6, M1, M3, M5, M6, L1.
   Net **−336 lines**; tests green under `-race` for both default and
   `gotail_nofsnotify` build tags.
 - `877e5d6` — M2, M4, M7. Tiny follow-up batch.
+- _pending_ — L2, L3, L4. Trivial cleanups + `tail.MemorySource` →
+  `tail.StaticSource` rename to disambiguate from `tailtest.MemorySource`.
 
-Remaining open items are L2–L5 (low-impact / stylistic). None affect
-behavior or performance.
+L5 closed as **wontfix** (plumbing cost > gain).

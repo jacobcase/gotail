@@ -31,18 +31,18 @@ func (s *singleFileSource) Enumerate(_ context.Context) ([]string, error) {
 	return []string{s.path}, nil
 }
 
-// MemorySource returns a [Source] backed by a fixed, immutable slice of paths.
+// StaticSource returns a [Source] backed by a fixed, immutable slice of paths.
 // Intended for tests; use tailtest.MemorySource for mutable mid-tail scenarios.
-func MemorySource(paths []string) Source {
+func StaticSource(paths []string) Source {
 	cp := make([]string, len(paths))
 	copy(cp, paths)
-	return &memorySource{paths: cp}
+	return &staticSource{paths: cp}
 }
 
-type memorySource struct{ paths []string }
+type staticSource struct{ paths []string }
 
-func (m *memorySource) Enumerate(_ context.Context) ([]string, error) {
-	return m.paths, nil
+func (s *staticSource) Enumerate(_ context.Context) ([]string, error) {
+	return s.paths, nil
 }
 
 // LumberjackOption is a functional option for [Lumberjack].
@@ -250,9 +250,6 @@ func (s *logrotateSource) Enumerate(_ context.Context) ([]string, error) {
 
 	for _, p := range matches {
 		if p == s.activePath {
-			continue
-		}
-		if !strings.HasPrefix(p, prefix) {
 			continue
 		}
 		suffix := p[len(prefix):]

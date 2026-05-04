@@ -75,7 +75,9 @@ type cursorFile struct {
 	Version int             `json:"version"`
 }
 
-const maxMetaBytes = 64 * 1024
+// maxRawMetaBytes caps the user-supplied raw JSON. The on-disk envelope
+// (Pos + Version) adds a small constant overhead on top of this.
+const maxRawMetaBytes = 64 * 1024
 
 // FileCursor atomically persists checkpoints to a JSON file using a
 // write-to-tmp + fsync + rename sequence.
@@ -128,8 +130,8 @@ func (c *FileCursor) Load(_ context.Context) (Checkpoint, bool, error) {
 }
 
 func (c *FileCursor) Save(_ context.Context, cp Checkpoint) error {
-	if len(cp.Meta) > maxMetaBytes {
-		return fmt.Errorf("tail: meta size %d exceeds %d-byte limit", len(cp.Meta), maxMetaBytes)
+	if len(cp.Meta) > maxRawMetaBytes {
+		return fmt.Errorf("tail: raw meta size %d exceeds %d-byte limit", len(cp.Meta), maxRawMetaBytes)
 	}
 	data, err := json.Marshal(cursorFile{Pos: cp.Pos, Meta: cp.Meta, Version: cursorVersion})
 	if err != nil {

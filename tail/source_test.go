@@ -21,9 +21,9 @@ func TestSingleFileSource(t *testing.T) {
 	}
 }
 
-func TestMemorySource(t *testing.T) {
+func TestStaticSource(t *testing.T) {
 	in := []string{"a.log", "b.log", "c.log"}
-	src := tail.MemorySource(in)
+	src := tail.StaticSource(in)
 	paths, err := src.Enumerate(context.Background())
 	if err != nil {
 		t.Fatalf("Enumerate: %v", err)
@@ -41,7 +41,7 @@ func TestMemorySource(t *testing.T) {
 	in[0] = "mutated"
 	paths2, _ := src.Enumerate(context.Background())
 	if paths2[0] == "mutated" {
-		t.Fatal("MemorySource did not copy its input slice")
+		t.Fatal("StaticSource did not copy its input slice")
 	}
 }
 

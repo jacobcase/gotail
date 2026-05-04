@@ -8,7 +8,7 @@ import (
 )
 
 // MemorySource is a mutable, thread-safe [tail.Source] for controlled
-// mid-tail rotation scenarios. Use [tail.MemorySource] for immutable test
+// mid-tail rotation scenarios. Use [tail.StaticSource] for immutable test
 // sources; use MemorySource when you need to Add or Prune files while a
 // Tailer is running.
 type MemorySource struct {
