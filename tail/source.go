@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -172,11 +173,12 @@ func matchLumberjackCompressed(n, prefix, ext string) bool {
 
 // Glob returns a [Source] for log files with an explicit backup glob pattern.
 // backupGlob is passed to [filepath.Glob]; matches are sorted lexicographically
-// (oldest-first for numeric suffixes), and activePath is appended last.
+// and activePath is appended last.
 //
-// Example for logrotate numeric suffixes:
-//
-//	tail.Glob("/var/log/app.log", "/var/log/app.log.[0-9]*")
+// Lexicographic order is not the same as age order for numeric suffixes once
+// you have ten or more backups (".10" sorts before ".2"). For logrotate's
+// default numeric naming use [Logrotate] instead; for time-suffixed names use
+// [Lumberjack].
 func Glob(activePath, backupGlob string) Source {
 	return &globSource{activePath: activePath, backupGlob: backupGlob}
 }
@@ -193,4 +195,90 @@ func (g *globSource) Enumerate(_ context.Context) ([]string, error) {
 	}
 	sort.Strings(matches)
 	return append(matches, g.activePath), nil
+}
+
+// LogrotateOption is a functional option for [Logrotate].
+type LogrotateOption func(*logrotateSource)
+
+// WithLogrotateSkippedHook installs a callback that fires once per backup
+// file Logrotate recognises but cannot expose to the tailer. The hook is
+// invoked synchronously from [Source.Enumerate]; it must not block.
+//
+// reason is a short tag identifying why the file was skipped:
+//   - "compressed": the file is a compressed logrotate backup
+//     (<active>.<N>.gz). gotail does not decompress on read.
+func WithLogrotateSkippedHook(fn func(path, reason string)) LogrotateOption {
+	return func(s *logrotateSource) { s.skipped = fn }
+}
+
+// Logrotate returns a [Source] for log files rotated by logrotate's default
+// numeric naming scheme: <activePath>.1, <activePath>.2, ... where ".1" is
+// the most recent backup and the highest-numbered file is the oldest.
+//
+// Backups are returned oldest-first (highest N first); activePath is last.
+// Files matching <activePath>.<N>.gz are not enumerated; use
+// [WithLogrotateSkippedHook] to observe them.
+//
+// For logrotate with the dateext directive (which produces names like
+// app.log-20240315) use [Lumberjack] instead.
+func Logrotate(activePath string, opts ...LogrotateOption) Source {
+	s := &logrotateSource{activePath: activePath}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+type logrotateSource struct {
+	activePath string
+	skipped    func(path, reason string) // optional
+}
+
+func (s *logrotateSource) Enumerate(_ context.Context) ([]string, error) {
+	matches, err := filepath.Glob(s.activePath + ".*")
+	if err != nil {
+		return nil, fmt.Errorf("tail: logrotate glob: %w", err)
+	}
+
+	type backup struct {
+		path string
+		age  int // higher = older
+	}
+	var backups []backup
+	prefix := s.activePath + "."
+
+	for _, p := range matches {
+		if p == s.activePath {
+			continue
+		}
+		if !strings.HasPrefix(p, prefix) {
+			continue
+		}
+		suffix := p[len(prefix):]
+
+		if compressed, ok := strings.CutSuffix(suffix, ".gz"); ok {
+			if _, err := strconv.Atoi(compressed); err == nil {
+				if s.skipped != nil {
+					s.skipped(p, "compressed")
+				}
+			}
+			continue
+		}
+
+		n, err := strconv.Atoi(suffix)
+		if err != nil {
+			continue // not a numeric backup; ignore
+		}
+		backups = append(backups, backup{path: p, age: n})
+	}
+
+	sort.Slice(backups, func(i, j int) bool {
+		return backups[i].age > backups[j].age // oldest (largest N) first
+	})
+
+	result := make([]string, 0, len(backups)+1)
+	for _, b := range backups {
+		result = append(result, b.path)
+	}
+	return append(result, s.activePath), nil
 }

@@ -2,6 +2,7 @@ package tail_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -227,6 +228,93 @@ func TestGlobSource_Patterns(t *testing.T) {
 		if paths[i] != want {
 			t.Fatalf("paths[%d]: want %q, got %q", i, want, paths[i])
 		}
+	}
+}
+
+func TestLogrotateSource_DoubleDigitOrder(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "app.log")
+	touch(t, active)
+
+	// Twelve backups; .1 is newest, .12 is oldest. The historical Glob bug
+	// would put .10/.11/.12 between .1 and .2 (lex order); Logrotate must
+	// instead return them in age order: .12, .11, ..., .1.
+	for i := 1; i <= 12; i++ {
+		touch(t, filepath.Join(dir, fmt.Sprintf("app.log.%d", i)))
+	}
+
+	src := tail.Logrotate(active)
+	paths, err := src.Enumerate(context.Background())
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(paths) != 13 {
+		t.Fatalf("want 13 paths, got %d: %v", len(paths), paths)
+	}
+	if paths[12] != active {
+		t.Fatalf("active must be last, got %q", paths[12])
+	}
+	for i, want := 0, 12; i < 12; i, want = i+1, want-1 {
+		gotName := filepath.Base(paths[i])
+		wantName := fmt.Sprintf("app.log.%d", want)
+		if gotName != wantName {
+			t.Fatalf("paths[%d] = %q, want %q", i, gotName, wantName)
+		}
+	}
+}
+
+func TestLogrotateSource_CompressedBackupsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "app.log")
+	touch(t, active)
+	touch(t, filepath.Join(dir, "app.log.1"))
+	touch(t, filepath.Join(dir, "app.log.2.gz"))
+	touch(t, filepath.Join(dir, "app.log.3.gz"))
+
+	var skipped []string
+	src := tail.Logrotate(active, tail.WithLogrotateSkippedHook(func(path, reason string) {
+		if reason != "compressed" {
+			t.Errorf("unexpected reason %q for %q", reason, path)
+		}
+		skipped = append(skipped, filepath.Base(path))
+	}))
+	paths, err := src.Enumerate(context.Background())
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("want 2 paths (.1 + active), got %d: %v", len(paths), paths)
+	}
+	if filepath.Base(paths[0]) != "app.log.1" || paths[1] != active {
+		t.Fatalf("got %v", paths)
+	}
+	if len(skipped) != 2 {
+		t.Fatalf("hook fired %d times, want 2: %v", len(skipped), skipped)
+	}
+}
+
+func TestLogrotateSource_IgnoresJunk(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "app.log")
+	touch(t, active)
+	touch(t, filepath.Join(dir, "app.log.1"))
+	touch(t, filepath.Join(dir, "app.log.bak"))   // not numeric
+	touch(t, filepath.Join(dir, "app.log.swp"))   // editor swap
+	touch(t, filepath.Join(dir, "app.log.2.tmp")) // numeric but with extra suffix
+
+	hookFired := false
+	src := tail.Logrotate(active, tail.WithLogrotateSkippedHook(func(string, string) {
+		hookFired = true
+	}))
+	paths, err := src.Enumerate(context.Background())
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(paths) != 2 || filepath.Base(paths[0]) != "app.log.1" || paths[1] != active {
+		t.Fatalf("got %v", paths)
+	}
+	if hookFired {
+		t.Fatal("hook fired for non-compressed junk; expected silent skip")
 	}
 }
 
