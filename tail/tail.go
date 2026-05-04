@@ -90,12 +90,18 @@ type Options struct {
 type Tailer struct {
 	opts  Options
 	files []string // enumerated at construction; oldest-first snapshot
-	lr    *watch.LineReader
+
+	// lr is single-writer: written by New and by advance (which only runs
+	// inside Next). Close reads it only after activeNext.Wait() has parked
+	// the Next goroutine, so no lock is required around access.
+	lr *watch.LineReader
 
 	fileIdx    int  // index of the currently-watched file in t.files
 	atActive   bool // true when fileIdx == len(files)-1
 	whenceUsed bool // true after the initial seek (opts.Whence) has been applied
 
+	// mu guards cur and lastMeta — accessed by Position/Commit from any
+	// goroutine concurrent with Next.
 	mu       sync.Mutex
 	cur      Position
 	lastMeta json.RawMessage // preserved across plain Commit calls
@@ -222,12 +228,7 @@ func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) 
 	if err != nil {
 		return fmt.Errorf("tail: open %s: %w", path, err)
 	}
-	lrOpts := watch.LineOptions{}
-	if t.opts.OnTruncated != nil {
-		fn := t.opts.OnTruncated
-		lrOpts.OnTruncated = func(at watch.Position) { fn(at) }
-	}
-	t.lr = watch.NewLineReader(w, lrOpts)
+	t.lr = watch.NewLineReader(w, watch.LineOptions{OnTruncated: t.opts.OnTruncated})
 	return nil
 }
 
@@ -253,11 +254,7 @@ func findFileByInode(files []string, want uint64, noInodeCheck bool) int {
 // advance closes the current LineReader and opens the next file in the series.
 func (t *Tailer) advance(ctx context.Context) error {
 	prev := t.cur
-
-	t.mu.Lock()
-	lr := t.lr
-	t.mu.Unlock()
-	_ = lr.Close()
+	_ = t.lr.Close()
 
 	nextIdx := t.fileIdx + 1
 	if nextIdx >= len(t.files) {
@@ -324,11 +321,7 @@ func (t *Tailer) Next(ctx context.Context) (Record, error) {
 	defer stop()
 
 	for {
-		t.mu.Lock()
-		lr := t.lr
-		t.mu.Unlock()
-
-		line, pos, err := lr.Next(callCtx)
+		line, pos, err := t.lr.Next(callCtx)
 		if err != nil {
 			if t.closeCtx.Err() != nil {
 				// Close is in progress; surface as exhaustion rather than ctx.Err.
@@ -436,11 +429,8 @@ func (t *Tailer) Close() error {
 		t.closeCancel()
 		t.activeNext.Wait()
 
-		t.mu.Lock()
-		lr := t.lr
-		t.mu.Unlock()
-		if lr != nil {
-			rerr = lr.Close()
+		if t.lr != nil {
+			rerr = t.lr.Close()
 		}
 		if t.opts.Cursor != nil {
 			if err := t.opts.Cursor.Close(); err != nil && rerr == nil {

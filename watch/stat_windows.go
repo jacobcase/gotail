@@ -18,3 +18,18 @@ func fileID(f *os.File) uint64 {
 	}
 	return uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow)
 }
+
+// statSizeInode returns size + inode for path. On Windows the file index
+// requires an open handle, so this is open-stat-close.
+func statSizeInode(path string) (int64, uint64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, 0, err
+	}
+	return fi.Size(), fileID(f), nil
+}

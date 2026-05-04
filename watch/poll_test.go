@@ -70,27 +70,22 @@ func rotate(t *testing.T, path string) {
 	}
 }
 
-// TestReadAfterWatcher verifies the race-aware rotation drain: bytes written to
-// the old file between the size check and rotation detection must be surfaced
-// before switching to the new file.
-//
-// In v2, the Watcher emits a non-ReOpened "new data" event for any unread
-// bytes in the old file (size > p.pos watermark) before emitting the rotation
-// ReOpened event. The Watcher's p.pos tracks what it has told the consumer is
-// available, not the consumer's actual read position.
-func TestReadAfterWatcher(t *testing.T) {
+// TestPollingWatcher_RotationEmitsReopened verifies that when the path
+// inode changes, the watcher emits a single ReOpened event with the new
+// inode at offset 0. After H3 the watcher holds no fd to the active file,
+// so trailing-bytes drain on the rotated-out inode is the LineReader's
+// concern (it owns the fd) — see TestLineReader_Rotate.
+func TestPollingWatcher_RotationEmitsReopened(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.log")
-
-	// Write 9 bytes to file.
-	writeFile(t, path, "foobarbaz")
+	writeFile(t, path, "foobarbaz") // 9 bytes
 
 	w := mustNewPolling(t, pollCfg(path))
 
-	// Wait 1: file is opened. p.pos = 0.
+	// Wait 1: open at offset 0.
 	ev := waitEvent(t, ctx, w)
 	if !ev.ReOpened {
 		t.Fatal("expected ReOpened on first open")
@@ -98,81 +93,31 @@ func TestReadAfterWatcher(t *testing.T) {
 	if ev.Pos.Offset != 0 {
 		t.Fatalf("expected Pos.Offset=0, got %d", ev.Pos.Offset)
 	}
+	initialInode := ev.Pos.Inode
 
-	// Rotate the file now, before calling Wait again.
-	// p.pos is still 0; file size is 9.
+	// Wait 2: 9 bytes of new data.
+	ev = waitEvent(t, ctx, w)
+	if ev.ReOpened {
+		t.Fatalf("expected non-ReOpened new-data event, got ReOpened")
+	}
+	if ev.Pos.Offset != 0 {
+		t.Fatalf("expected Pos.Offset=0 for new data, got %d", ev.Pos.Offset)
+	}
+
+	// Rotate.
 	rotate(t, path)
 	writeFile(t, path, "newfile")
 
-	// Wait 2: Watcher sees size=9 > p.pos=0 → "new data" event (non-ReOpened).
-	// This is the trailing-bytes signal for the old file (all 9 bytes).
+	// Wait 3: rotation detected via inode change → ReOpened, offset 0, new inode.
 	ev = waitEvent(t, ctx, w)
-	if ev.ReOpened {
-		t.Fatalf("expected non-ReOpened trailing-bytes event, got ReOpened")
+	if !ev.ReOpened {
+		t.Fatalf("expected ReOpened after rotation, got %+v", ev)
 	}
 	if ev.Pos.Offset != 0 {
-		t.Fatalf("expected Pos.Offset=0 for trailing bytes, got %d", ev.Pos.Offset)
+		t.Fatalf("rotation: expected offset 0, got %d", ev.Pos.Offset)
 	}
-
-	// Wait 3: p.pos=9, size=9; rotation is now detected.
-	// Race-aware check: fi2.size==p.pos → no further trailing bytes → ReOpened.
-	ev = waitEvent(t, ctx, w)
-	if !ev.ReOpened {
-		t.Fatal("expected ReOpened for new file after drain")
-	}
-	if ev.Pos.Offset != 0 {
-		t.Fatalf("expected new file to start at offset 0, got %d", ev.Pos.Offset)
-	}
-	if ev.PreRotation == nil {
-		t.Fatal("expected PreRotation to carry old file reference")
-	}
-	if ev.PreRotation.FinalSize != 9 {
-		t.Fatalf("expected PreRotation.FinalSize=9, got %d", ev.PreRotation.FinalSize)
-	}
-}
-
-// TestReadAfterWatcher_RaceDrain verifies the specific race: bytes appended to
-// the old file AFTER the initial size check but BEFORE rotation detection are
-// caught by the re-stat in the Watcher.
-func TestReadAfterWatcher_RaceDrain(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "race.log")
-	writeFile(t, path, "initial\n")
-
-	c := pollCfg(path)
-	w := mustNewPolling(t, c)
-
-	// Open event.
-	ev := waitEvent(t, ctx, w)
-	if !ev.ReOpened {
-		t.Fatal("expected ReOpened")
-	}
-
-	// Wait 2: new data (size=8 > p.pos=0).
-	ev = waitEvent(t, ctx, w)
-	if ev.ReOpened {
-		t.Fatal("expected non-ReOpened")
-	}
-
-	// Simulate race: append bytes to old file, then rotate, in one poll tick.
-	appendFile(t, path, "appended\n")
-	rotate(t, path)
-	writeFile(t, path, "new\n")
-
-	// Wait 3: Watcher sees p.pos=8, file-at-path is new. Race re-stat sees
-	// old fd size=17 (8+9) > p.pos=8 → emit "new data" for appended bytes.
-	ev = waitEvent(t, ctx, w)
-	if ev.ReOpened {
-		t.Fatalf("race drain: expected non-ReOpened for appended bytes, got ReOpened")
-	}
-
-	// Wait 4: rotation finally detected and emitted.
-	ev = waitEvent(t, ctx, w)
-	if !ev.ReOpened {
-		t.Fatal("race drain: expected ReOpened after drain")
+	if ev.Pos.Inode != 0 && ev.Pos.Inode == initialInode {
+		t.Fatalf("expected new inode after rotation; both events have inode %d", initialInode)
 	}
 }
 
@@ -333,8 +278,9 @@ func TestStopAtEOF(t *testing.T) {
 	}
 }
 
-// TestPollingWatcher_Rotation verifies the full rename+create rotation path
-// including the race-aware drain and PreRotation handoff.
+// TestPollingWatcher_Rotation verifies the full rename+create rotation path:
+// the watcher emits ReOpened with the new inode after rotation. Drain of
+// trailing bytes on the old inode is the LineReader's responsibility.
 func TestPollingWatcher_Rotation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -349,12 +295,13 @@ func TestPollingWatcher_Rotation(t *testing.T) {
 	if !ev.ReOpened {
 		t.Fatal("expected initial ReOpened")
 	}
+	initialInode := ev.Pos.Inode
 
 	// Rotate: rename old file, create new.
 	rotate(t, path)
 	writeFile(t, path, "line3\n")
 
-	// Drain old file events, then expect ReOpened with PreRotation.
+	// Drain any pre-rotation new-data events, then expect ReOpened.
 	var rotationEv watch.Event
 	for i := 0; i < 20; i++ {
 		ev = waitEvent(t, ctx, w)
@@ -367,8 +314,11 @@ func TestPollingWatcher_Rotation(t *testing.T) {
 	if !rotationEv.ReOpened {
 		t.Fatal("never got ReOpened after rotation")
 	}
-	if rotationEv.PreRotation == nil {
-		t.Fatal("expected non-nil PreRotation on rotation event")
+	if rotationEv.Pos.Offset != 0 {
+		t.Fatalf("rotation: expected offset 0, got %d", rotationEv.Pos.Offset)
+	}
+	if rotationEv.Pos.Inode != 0 && rotationEv.Pos.Inode == initialInode {
+		t.Fatalf("expected new inode after rotation; got %d (same as initial)", initialInode)
 	}
 }
 

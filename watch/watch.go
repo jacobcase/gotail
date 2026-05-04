@@ -3,9 +3,7 @@ package watch
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
-	"os"
 	"time"
 )
 
@@ -23,11 +21,12 @@ func (p Position) IsZero() bool {
 
 // Event describes a state transition observed by a [Watcher]. The Watcher
 // emits events; it does not yield bytes. The consumer (typically [LineReader])
-// opens its own file handle against Event.Path for normal reads.
+// holds the only fd to the active file and reads from it directly.
 //
-// On rotation, PreRotation provides access to trailing bytes from the
-// rotated-out file via a Reader the Watcher keeps open until the next Wait
-// call — preserving the race-aware drain behaviour of v1.
+// Trailing bytes on a rotated-out file surface naturally through the
+// LineReader's reads against its own fd: after a ReOpened event signals
+// rotation, the LineReader continues reading from its existing fd until
+// EOF before opening the new file at Event.Path.
 type Event struct {
 	// Path is the current active path; only changes when ReOpened is true.
 	Path string
@@ -37,21 +36,11 @@ type Event struct {
 	ReOpened bool
 	// Truncated is true when the file size dropped below the current position.
 	Truncated bool
-	// PreRotation is non-nil when ReOpened was triggered by rotation with
-	// pending unread bytes in the old file. Valid until the next Wait or Close.
-	PreRotation *PreRotation
 }
 
-// PreRotation grants access to trailing bytes on the rotated-out file.
-// Reader is valid until the next call to [Watcher.Wait] or [Watcher.Close].
-type PreRotation struct {
-	Reader    io.Reader
-	FinalSize int64
-	StartPos  int64
-}
-
-// Watcher emits events about file state transitions. Production implementations
-// own a *os.File internally and manage its lifecycle. Tests can use [FakeWatcher].
+// Watcher emits events about file state transitions. Production
+// implementations stat the path; the consumer (LineReader) owns the only fd.
+// Tests can use [FakeWatcher].
 type Watcher interface {
 	Wait(ctx context.Context) (Event, error)
 	Close() error
@@ -98,12 +87,8 @@ func New(c Config) (Watcher, error) {
 // filesystems where a stable identity is not available (e.g., ReFS, some
 // network filesystems).
 func StatInode(path string) (uint64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	return fileID(f), nil
+	_, inode, err := statSizeInode(path)
+	return inode, err
 }
 
 var (

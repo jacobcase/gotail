@@ -198,9 +198,10 @@ func (l *LineReader) handleEvent(ev Event) error {
 				return err
 			}
 		} else {
-			// Rotation — continue reading from own fd (old file) until EOF,
-			// then switch to the new file. The Watcher's PreRotation.Reader
-			// is not used; the LineReader manages its own fd.
+			// Rotation — continue reading from own fd (now pointing at the
+			// rotated-out inode) until EOF, then switch to the new file at
+			// ev.Path. The kernel keeps the old inode alive while we hold
+			// the fd, which is how trailing bytes get drained.
 			l.pendingNewFile = ev.Path
 			l.pendingNewPos = ev.Pos
 		}

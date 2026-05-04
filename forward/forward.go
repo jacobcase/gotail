@@ -4,11 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"iter"
 	"log/slog"
 	"math/rand/v2"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jacobcase/gotail/v2/tail"
@@ -26,8 +23,13 @@ type Record = tail.Record
 
 // RecordSource is the read side of a [tail.Tailer]. [*tail.Tailer] satisfies
 // this interface, enabling Forwarder to be tested with lightweight fakes.
+//
+// Next blocks until the next record is available, ctx is cancelled, or the
+// source is exhausted. It must honour ctx cancellation (including a deadline
+// derived from ctx by Forwarder for batch-age enforcement). To signal natural
+// exhaustion, return [tail.ErrSourceExhausted].
 type RecordSource interface {
-	Records(ctx context.Context) iter.Seq2[Record, error]
+	Next(ctx context.Context) (Record, error)
 	Commit(ctx context.Context, pos Position) error
 	Done() <-chan struct{}
 }
@@ -64,15 +66,6 @@ type Options[T any] struct {
 	// Retry configuration.
 	InitialBackoff time.Duration // first retry sleep; default 100ms
 	MaxBackoff     time.Duration // backoff ceiling; default 30s
-
-	// PrefetchBuffer is the size of the internal channel between the source
-	// reader and the batching consumer. The reader may pull up to this many
-	// records past the source boundary while the consumer is blocked in a
-	// sink retry, so it bounds the additional memory held during retries to
-	// roughly PrefetchBuffer × line_size. Zero or negative selects the
-	// default of 16, which suits typical (few-KB) line sizes; lower it when
-	// records are large or memory is tight.
-	PrefetchBuffer int
 
 	Logger *slog.Logger
 
@@ -114,9 +107,6 @@ func New[T any](opts Options[T]) (*Forwarder[T], error) {
 	if opts.MaxBackoff <= 0 {
 		opts.MaxBackoff = 30 * time.Second
 	}
-	if opts.PrefetchBuffer <= 0 {
-		opts.PrefetchBuffer = 16
-	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
@@ -124,73 +114,20 @@ func New[T any](opts Options[T]) (*Forwarder[T], error) {
 }
 
 // Run reads from Source until it is exhausted or ctx is cancelled.
-// It returns nil when Source signals exhaustion (StopAtEOF), ctx.Err() on
-// cancellation, or a wrapped [ErrPermanent] on a non-retryable Sink failure.
+// It returns nil when Source signals exhaustion ([tail.ErrSourceExhausted]),
+// ctx.Err() on cancellation, or a wrapped [ErrPermanent] on a non-retryable
+// Sink failure.
+//
+// MaxBatchAge is enforced by giving each Source.Next call a derived
+// deadline of (batchStart + MaxBatchAge) when a non-empty batch is in
+// flight; on context.DeadlineExceeded the batch is flushed.
 func (f *Forwarder[T]) Run(ctx context.Context) error {
-	type recItem struct {
-		rec tail.Record
-		err error
-	}
-
-	// Derive a child context so that any return from Run cancels the feeder
-	// goroutine; wg ensures Run does not return until the feeder has fully
-	// exited. Defers run LIFO: cancel() (registered last) fires first,
-	// freeing the feeder, then wg.Wait() blocks for its exit.
-	ctx, cancel := context.WithCancel(ctx)
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	defer cancel()
-
-	// Feed records into a buffered channel so the batch-age timer can interrupt
-	// the wait for the next record. The buffer also lets the feeder read ahead
-	// while the consumer is blocked in a sink retry; see Options.PrefetchBuffer.
-	recCh := make(chan recItem, f.opts.PrefetchBuffer)
-	// feederDrained is set true iff the Source iterator finished naturally
-	// (no error yielded, no ctx-bail). It distinguishes the two paths that
-	// produce !ok on recCh in the consumer below: a clean drain (deliver the
-	// final batch) versus a ctx-cancellation bail (honor the cancellation).
-	// Without it, a custom RecordSource that drains cleanly while ctx is
-	// cancelled in the same instant could surface ctx.Err() instead of nil.
-	var feederDrained atomic.Bool
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(recCh)
-		for rec, err := range f.opts.Source.Records(ctx) {
-			select {
-			case recCh <- recItem{rec, err}:
-			case <-ctx.Done():
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-		feederDrained.Store(true)
-	}()
-
 	var (
 		batch        []T
 		batchBytes   int
 		batchLastPos Position
-		ageTimer     *time.Timer
-		ageTimerC    <-chan time.Time
+		batchStart   time.Time
 	)
-
-	startAge := func() {
-		if f.opts.MaxBatchAge > 0 && ageTimer == nil {
-			ageTimer = time.NewTimer(f.opts.MaxBatchAge)
-			ageTimerC = ageTimer.C
-		}
-	}
-	stopAge := func() {
-		if ageTimer != nil {
-			ageTimer.Stop()
-			ageTimer = nil
-			ageTimerC = nil
-		}
-	}
-	defer stopAge()
 
 	flush := func() error {
 		if len(batch) == 0 {
@@ -199,65 +136,65 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 		err := f.sendWithRetry(ctx, batch, batchLastPos)
 		batch = batch[:0]
 		batchBytes = 0
-		stopAge()
+		batchStart = time.Time{}
 		return err
 	}
 
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		// Per-Next deadline: only when a batch is in flight and an age cap
+		// is configured. The deadline is the parent ctx if neither.
+		nextCtx := ctx
+		var cancel context.CancelFunc
+		if len(batch) > 0 && f.opts.MaxBatchAge > 0 {
+			nextCtx, cancel = context.WithDeadline(ctx, batchStart.Add(f.opts.MaxBatchAge))
+		}
+		rec, err := f.opts.Source.Next(nextCtx)
+		if cancel != nil {
+			cancel()
+		}
 
-		case <-ageTimerC:
-			if err := flush(); err != nil {
-				return err
-			}
-
-		case item, ok := <-recCh:
-			if !ok {
-				// Feeder exited. feederDrained tells us why: true means the
-				// Source iterator finished naturally (deliver the final batch),
-				// false means ctx-cancellation (honor it). Reading ctx.Err()
-				// alone is racy when both happen in the same instant.
-				if feederDrained.Load() {
-					return flush()
-				}
+		if err != nil {
+			// Distinguish per-Next deadline (age timer fired) from real
+			// parent-ctx cancellation by checking ctx.Err() directly.
+			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if item.err != nil {
-				if errors.Is(item.err, tail.ErrSourceExhausted) {
-					if err := flush(); err != nil {
-						return err
-					}
-					return nil
+			if errors.Is(err, context.DeadlineExceeded) {
+				if ferr := flush(); ferr != nil {
+					return ferr
 				}
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				return item.err
-			}
-
-			val, err := f.opts.Decoder(item.rec.Line)
-			if err != nil {
-				if f.opts.OnDecodeError != nil {
-					f.opts.OnDecodeError(item.rec.Line, item.rec.Pos, err)
-				}
-				// Advance position past this line even though we skip it.
-				batchLastPos = item.rec.Pos
 				continue
 			}
-
-			batch = append(batch, val)
-			batchBytes += len(item.rec.Line)
-			batchLastPos = item.rec.Pos
-			startAge()
-
-			shouldFlush := (f.opts.MaxBatchRecords > 0 && len(batch) >= f.opts.MaxBatchRecords) ||
-				(f.opts.MaxBatchBytes > 0 && batchBytes >= f.opts.MaxBatchBytes)
-			if shouldFlush {
-				if err := flush(); err != nil {
-					return err
+			if errors.Is(err, tail.ErrSourceExhausted) {
+				if ferr := flush(); ferr != nil {
+					return ferr
 				}
+				return nil
+			}
+			return err
+		}
+
+		val, derr := f.opts.Decoder(rec.Line)
+		if derr != nil {
+			if f.opts.OnDecodeError != nil {
+				f.opts.OnDecodeError(rec.Line, rec.Pos, derr)
+			}
+			batchLastPos = rec.Pos
+			continue
+		}
+
+		if len(batch) == 0 {
+			batchStart = time.Now()
+		}
+		batch = append(batch, val)
+		batchBytes += len(rec.Line)
+		batchLastPos = rec.Pos
+
+		shouldFlush := (f.opts.MaxBatchRecords > 0 && len(batch) >= f.opts.MaxBatchRecords) ||
+			(f.opts.MaxBatchBytes > 0 && batchBytes >= f.opts.MaxBatchBytes)
+		if shouldFlush {
+			if ferr := flush(); ferr != nil {
+				return ferr
 			}
 		}
 	}
@@ -296,9 +233,11 @@ func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, pos Positio
 		if f.opts.OnBackoffSleep != nil {
 			f.opts.OnBackoffSleep(d, attempt)
 		}
+		t := time.NewTimer(d)
 		select {
-		case <-time.After(d):
+		case <-t.C:
 		case <-ctx.Done():
+			t.Stop()
 			return ctx.Err()
 		}
 	}
@@ -307,13 +246,13 @@ func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, pos Positio
 // jitteredBackoff returns a full-jitter duration for the given attempt:
 // rand(0, min(MaxBackoff, InitialBackoff * 2^attempt)).
 func (f *Forwarder[T]) jitteredBackoff(attempt int) time.Duration {
-	ceiling := f.opts.InitialBackoff
-	for range attempt {
-		ceiling *= 2
-		if ceiling <= 0 || ceiling > f.opts.MaxBackoff {
-			ceiling = f.opts.MaxBackoff
-			break
-		}
+	shift := attempt
+	if shift > 62 {
+		shift = 62
+	}
+	ceiling := f.opts.InitialBackoff << shift
+	if ceiling <= 0 || ceiling > f.opts.MaxBackoff {
+		ceiling = f.opts.MaxBackoff
 	}
 	if ceiling <= 0 {
 		return 0

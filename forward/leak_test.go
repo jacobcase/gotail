@@ -6,10 +6,10 @@ import (
 	"go.uber.org/goleak"
 )
 
-// TestMain runs goleak after the suite to catch goroutine leaks. The
-// forward package owns the feeder goroutine wired to RecordSource and is
-// the most likely site for a regression that resurrects the leak fixed
-// in Issue #8 (CODE_REVIEW.md).
+// TestMain runs goleak after the suite to catch goroutine leaks. After
+// the H1 refactor, Forwarder.Run owns no goroutines of its own — but
+// downstream code (Tailer, Watcher) does, and this guards against
+// regressions there leaking through forward integration tests.
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }

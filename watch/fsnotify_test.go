@@ -87,18 +87,17 @@ func TestFsnotify_WriteEvent(t *testing.T) {
 	}
 }
 
-// TestFsnotify_ReadAfterWatcher_RaceDrain mirrors the polling backend's
-// race-drain test (TestReadAfterWatcher_RaceDrain in poll_test.go) on the
-// fsnotify path. The two backends share the same rotation-drain state
-// machine; this test pins that the fsnotify branch's re-stat after rotation
-// surfaces bytes appended to the old fd before switching to the new file.
-func TestFsnotify_ReadAfterWatcher_RaceDrain(t *testing.T) {
+// TestFsnotify_RotationEmitsReopened mirrors poll_test.go's
+// TestPollingWatcher_RotationEmitsReopened on the fsnotify backend.
+// After H3 the watcher detects rotation purely via path inode change;
+// trailing-bytes drain is the LineReader's job (see TestLineReader_Rotate).
+func TestFsnotify_RotationEmitsReopened(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "race.log")
-	writeFile(t, path, "initial\n") // 8 bytes
+	writeFile(t, path, "initial\n")
 
 	w, err := watch.NewFsnotify(watch.Config{Path: path})
 	if err != nil {
@@ -114,6 +113,7 @@ func TestFsnotify_ReadAfterWatcher_RaceDrain(t *testing.T) {
 	if !ev.ReOpened {
 		t.Fatalf("expected ReOpened, got %+v", ev)
 	}
+	initialInode := ev.Pos.Inode
 
 	// Wait 2: initial 8 bytes surfaced as a new-data event.
 	ev, err = w.Wait(ctx)
@@ -124,30 +124,32 @@ func TestFsnotify_ReadAfterWatcher_RaceDrain(t *testing.T) {
 		t.Fatalf("expected non-ReOpened new-data event, got %+v", ev)
 	}
 
-	// Race: append 9 bytes to old file, then rotate it away, then create new
-	// file at the path. Old fd remains open and visible at the original inode.
+	// Rotate.
 	appendFile(t, path, "appended\n")
 	rotate(t, path)
 	writeFile(t, path, "new\n")
 
-	// Wait 3: race-drain. Old fd's size is now 17 > pos=8. The fsnotify Wait
-	// loop must emit a new-data event for the 9 appended bytes before
-	// switching to the rotated-in file.
-	ev, err = w.Wait(ctx)
-	if err != nil {
-		t.Fatalf("Wait #3: %v", err)
+	// Drain any non-ReOpened size-bump events for the path before rotation
+	// landed, then expect ReOpened with a new inode.
+	var rotationEv watch.Event
+	for i := 0; i < 20; i++ {
+		ev, err = w.Wait(ctx)
+		if err != nil {
+			t.Fatalf("Wait #%d: %v", i+3, err)
+		}
+		if ev.ReOpened {
+			rotationEv = ev
+			break
+		}
 	}
-	if ev.ReOpened {
-		t.Fatalf("race drain: expected non-ReOpened for appended bytes, got %+v", ev)
+	if !rotationEv.ReOpened {
+		t.Fatal("never observed ReOpened after rotation")
 	}
-
-	// Wait 4: rotation surfaces.
-	ev, err = w.Wait(ctx)
-	if err != nil {
-		t.Fatalf("Wait #4: %v", err)
+	if rotationEv.Pos.Offset != 0 {
+		t.Fatalf("rotation: expected offset 0, got %d", rotationEv.Pos.Offset)
 	}
-	if !ev.ReOpened {
-		t.Fatalf("expected ReOpened after race drain, got %+v", ev)
+	if rotationEv.Pos.Inode != 0 && rotationEv.Pos.Inode == initialInode {
+		t.Fatalf("expected new inode after rotation; got %d (same as initial)", initialInode)
 	}
 }
 
