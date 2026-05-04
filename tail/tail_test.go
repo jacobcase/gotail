@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jacobcase/gotail/v2/tail"
+	"github.com/jacobcase/gotail/v2/watch"
 )
 
 func tailCfg(path string) tail.Options {
@@ -449,6 +450,115 @@ func TestTailer_OnCheckpoint_Hook(t *testing.T) {
 	if fired != 1 {
 		t.Fatalf("want OnCheckpoint fired 1 time, got %d", fired)
 	}
+}
+
+func TestTailer_MissingCheckpoint_FallbackOldest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	active := filepath.Join(dir, "app.log")
+	backup := filepath.Join(dir, "app-2024-01-01T00-00-00.log")
+
+	os.WriteFile(backup, []byte("backup-data\n"), 0o644)
+	os.WriteFile(active, []byte("active-data\n"), 0o644)
+
+	// Capture backup's inode for the cursor checkpoint.
+	inode, err := watchStatInode(backup)
+	if err != nil {
+		t.Fatalf("StatInode: %v", err)
+	}
+
+	cur := tail.NewMemoryCursor()
+	cur.Save(ctx, tail.Checkpoint{Pos: tail.Position{File: backup, Inode: inode, Offset: 0}})
+
+	// Delete the backup to simulate aging off.
+	os.Remove(backup)
+
+	var dropped int
+	opts := tail.Options{
+		Source:              tail.Lumberjack(active),
+		Cursor:              cur,
+		Interval:            10 * time.Millisecond,
+		StopAtEOF:           true,
+		OnMissingCheckpoint: tail.FallbackOldest,
+		OnDropped:           func(n int) { dropped = n },
+	}
+	tr := mustNew(t, opts)
+
+	var lines []string
+	for rec, err := range tr.Records(ctx) {
+		if err != nil {
+			break
+		}
+		lines = append(lines, string(rec.Line))
+	}
+
+	if len(lines) != 1 || lines[0] != "active-data" {
+		t.Fatalf("want [active-data], got %v", lines)
+	}
+	if dropped != 1 {
+		t.Fatalf("want OnDropped(1), got OnDropped(%d)", dropped)
+	}
+}
+
+func TestTailer_RotatesAcrossLumberjackBackups(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	active := filepath.Join(dir, "app.log")
+	backup1 := filepath.Join(dir, "app-2024-01-01T00-00-00.log")
+	backup2 := filepath.Join(dir, "app-2024-01-02T00-00-00.log")
+
+	os.WriteFile(backup1, []byte("b1\n"), 0o644)
+	os.WriteFile(backup2, []byte("b2\n"), 0o644)
+	os.WriteFile(active, []byte("active\n"), 0o644)
+
+	inode1, err := watchStatInode(backup1)
+	if err != nil {
+		t.Fatalf("StatInode backup1: %v", err)
+	}
+
+	cur := tail.NewMemoryCursor()
+	cur.Save(ctx, tail.Checkpoint{Pos: tail.Position{File: backup1, Inode: inode1, Offset: 0}})
+
+	var rotations []string
+	opts := tail.Options{
+		Source:    tail.Lumberjack(active),
+		Cursor:    cur,
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+		OnRotated: func(_, to tail.Position) {
+			rotations = append(rotations, filepath.Base(to.File))
+		},
+	}
+	tr := mustNew(t, opts)
+
+	var lines []string
+	for rec, err := range tr.Records(ctx) {
+		if err != nil {
+			break
+		}
+		lines = append(lines, string(rec.Line))
+	}
+
+	wantLines := []string{"b1", "b2", "active"}
+	if len(lines) != len(wantLines) {
+		t.Fatalf("want lines %v, got %v", wantLines, lines)
+	}
+	for i, w := range wantLines {
+		if lines[i] != w {
+			t.Fatalf("line[%d]: want %q, got %q", i, w, lines[i])
+		}
+	}
+	if len(rotations) != 2 {
+		t.Fatalf("want 2 OnRotated calls, got %d: %v", len(rotations), rotations)
+	}
+}
+
+func watchStatInode(path string) (uint64, error) {
+	return watch.StatInode(path)
 }
 
 // BenchmarkCursor_Save measures the per-Save cost.

@@ -8,7 +8,6 @@ import (
 	"io"
 	"iter"
 	"log/slog"
-	"os"
 	"sync"
 	"time"
 
@@ -32,14 +31,13 @@ type Record struct {
 type MissingPolicy int
 
 const (
-	// FallbackOldest resumes at the oldest still-present file, offset 0.
-	// For single-file sources this is equivalent to SkipToActive.
-	// Full multi-file semantics are implemented in Phase 3.
+	// FallbackOldest resumes at the oldest still-present file, offset 0, and
+	// fires [Options.OnDropped] with the count of dropped files.
 	FallbackOldest MissingPolicy = iota
 	// Fail returns [ErrCheckpointMissing] from [New].
 	Fail
 	// SkipToActive ignores the stale checkpoint and resumes at the active
-	// file, offset 0.
+	// file (last in Source.Enumerate), offset 0.
 	SkipToActive
 )
 
@@ -62,6 +60,10 @@ type Options struct {
 	// OnMissingCheckpoint controls behaviour when the loaded checkpoint names
 	// a file that is no longer present. Default is [FallbackOldest].
 	OnMissingCheckpoint MissingPolicy
+	// NoInodeCheck disables inode comparison during checkpoint resume and
+	// rotation detection. Use on filesystems with unstable inodes (Windows
+	// ReFS, certain FUSE mounts).
+	NoInodeCheck bool
 
 	// Hooks — all optional and nil-safe.
 	OnDropped    func(droppedFiles int)
@@ -76,16 +78,20 @@ type Options struct {
 // Tailer is not safe for concurrent use by multiple goroutines; however,
 // Close and Position may be called from any goroutine.
 type Tailer struct {
-	opts   Options
-	lr     *watch.LineReader
+	opts  Options
+	files []string // enumerated at construction; oldest-first snapshot
+	lr    *watch.LineReader
 
-	mu       sync.Mutex
-	cur      Position
-	lastMeta json.RawMessage // last committed meta; preserved across plain Commit calls
+	fileIdx  int  // index of the currently-watched file in t.files
+	atActive bool // true when fileIdx == len(files)-1
 
-	done     chan struct{}
-	doneOnce sync.Once
-	closed   chan struct{}
+	mu        sync.Mutex
+	cur       Position
+	lastMeta  json.RawMessage // preserved across plain Commit calls
+
+	done      chan struct{}
+	doneOnce  sync.Once
+	closed    chan struct{}
 	closeOnce sync.Once
 }
 
@@ -115,8 +121,8 @@ func New(opts Options) (*Tailer, error) {
 	if len(files) == 0 {
 		return nil, ErrSourceExhausted
 	}
-	activePath := files[len(files)-1]
 
+	startIdx := len(files) - 1 // default: start at active file
 	var resumePos *watch.Position
 	var lastMeta json.RawMessage
 
@@ -127,60 +133,124 @@ func New(opts Options) (*Tailer, error) {
 		}
 		if found {
 			lastMeta = cp.Meta
-			inodeMismatch, err := checkInode(activePath, cp.Pos.Inode)
-			if err != nil && !os.IsNotExist(err) {
-				return nil, fmt.Errorf("tail: stat %s: %w", activePath, err)
-			}
-			if !inodeMismatch {
+			// Find which file in the series matches the checkpoint inode.
+			matchIdx := findFileByInode(files, cp.Pos.Inode, opts.NoInodeCheck)
+
+			if matchIdx >= 0 {
+				startIdx = matchIdx
 				resumePos = &cp.Pos
 			} else {
+				// No file matches the checkpoint → apply missing policy.
 				switch opts.OnMissingCheckpoint {
 				case Fail:
 					return nil, ErrCheckpointMissing
-				case SkipToActive, FallbackOldest:
-					// Start from offset 0 of the active file.
-					// FallbackOldest's full multi-file semantics are Phase 3.
+				case SkipToActive:
+					startIdx = len(files) - 1
+				case FallbackOldest:
+					startIdx = 0
+					if opts.OnDropped != nil {
+						opts.OnDropped(1)
+					}
 				}
 			}
 		}
 	}
 
-	wc := watch.Config{
-		Path:      activePath,
-		Interval:  opts.Interval,
-		Resume:    resumePos,
-		StopAtEOF: opts.StopAtEOF,
-		Logger:    lg,
-	}
-	w, err := watch.NewPolling(wc)
-	if err != nil {
-		return nil, fmt.Errorf("tail: create watcher: %w", err)
-	}
-	lr := watch.NewLineReader(w, watch.LineOptions{})
-
-	return &Tailer{
+	t := &Tailer{
 		opts:     opts,
-		lr:       lr,
+		files:    files,
+		fileIdx:  startIdx,
+		atActive: startIdx == len(files)-1,
 		lastMeta: lastMeta,
 		done:     make(chan struct{}),
 		closed:   make(chan struct{}),
-	}, nil
+	}
+
+	if err := t.openFile(files[startIdx], resumePos, lg); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// openFile creates a new watcher+linereader for the file at path.
+// isBackup files use StopAtEOF=true so the watcher signals exhaustion.
+func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) error {
+	isActive := t.fileIdx == len(t.files)-1
+	wc := watch.Config{
+		Path:         path,
+		Interval:     t.opts.Interval,
+		Resume:       resume,
+		StopAtEOF:    !isActive || t.opts.StopAtEOF,
+		NoInodeCheck: t.opts.NoInodeCheck,
+		Logger:       lg,
+	}
+	w, err := watch.NewPolling(wc)
+	if err != nil {
+		return fmt.Errorf("tail: open %s: %w", path, err)
+	}
+	t.lr = watch.NewLineReader(w, watch.LineOptions{})
+	return nil
+}
+
+// findFileByInode returns the index in files whose inode matches want, or -1.
+// When noInodeCheck is true, treat Inode=0 comparisons as "always match"
+// (allowing offset-only resume on Windows or inode-less filesystems).
+func findFileByInode(files []string, want uint64, noInodeCheck bool) int {
+	for i, path := range files {
+		cur, err := watch.StatInode(path)
+		if err != nil {
+			continue // file may not exist yet
+		}
+		if noInodeCheck || (cur == 0 && want == 0) {
+			// Can't use inodes → treat first file as matching.
+			return i
+		}
+		if cur == want {
+			return i
+		}
+	}
+	return -1
 }
 
 // checkInode stats path and reports whether its inode differs from want.
-// Returns (false, nil) if the inodes match. Returns (true, nil) on mismatch.
-// Returns (false, err) if stat fails.
 func checkInode(path string, want uint64) (mismatch bool, err error) {
 	current, err := watch.StatInode(path)
 	if err != nil {
 		return false, err
 	}
-	// If both are 0 (Windows or inode-less FS), treat as match so callers
-	// can resume by offset without inode validation.
 	if want == 0 && current == 0 {
 		return false, nil
 	}
 	return current != want, nil
+}
+
+// advance closes the current LineReader and opens the next file in the series.
+func (t *Tailer) advance(ctx context.Context) error {
+	prev := t.cur
+
+	t.mu.Lock()
+	lr := t.lr
+	t.mu.Unlock()
+	_ = lr.Close()
+
+	nextIdx := t.fileIdx + 1
+	if nextIdx >= len(t.files) {
+		t.doneOnce.Do(func() { close(t.done) })
+		return ErrSourceExhausted
+	}
+
+	nextPath := t.files[nextIdx]
+	t.fileIdx = nextIdx
+	t.atActive = nextIdx == len(t.files)-1
+
+	if err := t.openFile(nextPath, nil, t.opts.Logger); err != nil {
+		return err
+	}
+
+	if t.opts.OnRotated != nil {
+		t.opts.OnRotated(prev, Position{File: nextPath})
+	}
+	return nil
 }
 
 // Records returns an iterator over lines in the file series.
@@ -202,31 +272,45 @@ func (t *Tailer) Records(ctx context.Context) iter.Seq2[Record, error] {
 }
 
 // Next returns the next line. It blocks until a line is available, the context
-// is cancelled, or (in StopAtEOF mode) the file is exhausted.
+// is cancelled, or (in StopAtEOF mode) the file series is exhausted.
 func (t *Tailer) Next(ctx context.Context) (Record, error) {
-	select {
-	case <-t.closed:
-		return Record{}, ErrSourceExhausted
-	default:
-	}
-
-	line, pos, err := t.lr.Next(ctx)
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			t.doneOnce.Do(func() { close(t.done) })
+	for {
+		select {
+		case <-t.closed:
 			return Record{}, ErrSourceExhausted
+		default:
 		}
-		if t.opts.OnError != nil {
-			t.opts.OnError(err)
+
+		t.mu.Lock()
+		lr := t.lr
+		t.mu.Unlock()
+
+		line, pos, err := lr.Next(ctx)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if t.atActive {
+					// Active file exhausted (StopAtEOF was set in watcher).
+					t.doneOnce.Do(func() { close(t.done) })
+					return Record{}, ErrSourceExhausted
+				}
+				// Backup file exhausted — advance to the next file.
+				if aerr := t.advance(ctx); aerr != nil {
+					return Record{}, aerr
+				}
+				continue
+			}
+			if t.opts.OnError != nil {
+				t.opts.OnError(err)
+			}
+			return Record{}, err
 		}
-		return Record{}, err
+
+		t.mu.Lock()
+		t.cur = pos
+		t.mu.Unlock()
+
+		return Record{Line: line, Pos: pos}, nil
 	}
-
-	t.mu.Lock()
-	t.cur = pos
-	t.mu.Unlock()
-
-	return Record{Line: line, Pos: pos}, nil
 }
 
 // Commit persists pos as a new Checkpoint, preserving any metadata from the
@@ -250,8 +334,8 @@ func (t *Tailer) Commit(ctx context.Context, pos Position) error {
 }
 
 // CommitWithMeta persists pos together with user-defined metadata. meta must
-// be JSON-serializable. The encoded metadata is also retained in memory so
-// that subsequent plain [Tailer.Commit] calls preserve it.
+// be JSON-serializable. The encoded metadata is retained in memory so that
+// subsequent plain [Tailer.Commit] calls preserve it.
 func (t *Tailer) CommitWithMeta(ctx context.Context, pos Position, meta any) error {
 	if t.opts.Cursor == nil {
 		return nil
@@ -284,7 +368,7 @@ func (t *Tailer) Position() Position {
 }
 
 // Done is closed when the source is exhausted in StopAtEOF mode.
-// In live-tail mode it is never closed by the Tailer.
+// In live-tail mode it is never closed by the Tailer itself.
 func (t *Tailer) Done() <-chan struct{} {
 	return t.done
 }
@@ -295,7 +379,12 @@ func (t *Tailer) Close() error {
 	var rerr error
 	t.closeOnce.Do(func() {
 		close(t.closed)
-		rerr = t.lr.Close()
+		t.mu.Lock()
+		lr := t.lr
+		t.mu.Unlock()
+		if lr != nil {
+			rerr = lr.Close()
+		}
 		if t.opts.Cursor != nil {
 			if err := t.opts.Cursor.Close(); err != nil && rerr == nil {
 				rerr = err
@@ -304,3 +393,4 @@ func (t *Tailer) Close() error {
 	})
 	return rerr
 }
+

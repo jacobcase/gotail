@@ -46,9 +46,10 @@ const (
 type FileCursorOption func(*fileCursorOpts)
 
 type fileCursorOpts struct {
-	dirSync  bool
-	syncMode SyncMode
-	fileMode os.FileMode
+	dirSync   bool
+	syncMode  SyncMode
+	fileMode  os.FileMode
+	flockPath string
 }
 
 // WithDirSync controls whether [FileCursor.Save] fsyncs the containing
@@ -70,6 +71,14 @@ func WithFileMode(mode os.FileMode) FileCursorOption {
 	return func(o *fileCursorOpts) { o.fileMode = mode }
 }
 
+// WithFlock acquires an exclusive advisory lock on lockPath before returning
+// from [NewFileCursor], and releases it in [Cursor.Close]. An empty lockPath
+// is a no-op. The lock file must be a sibling of the cursor file — never use
+// the cursor file itself, because rename-over-open silently drops POSIX locks.
+func WithFlock(lockPath string) FileCursorOption {
+	return func(o *fileCursorOpts) { o.flockPath = lockPath }
+}
+
 // cursorFile is the on-disk JSON format.
 type cursorFile struct {
 	Pos     Position        `json:"pos"`
@@ -84,10 +93,12 @@ const maxMetaBytes = 64 * 1024
 type FileCursor struct {
 	path string
 	opts fileCursorOpts
+	lk   *flock // nil when WithFlock was not used or path was empty
 }
 
 // NewFileCursor opens (or creates) a cursor at path. The containing directory
-// must already exist.
+// must already exist. If [WithFlock] is provided with a non-empty lock path,
+// the lock is acquired before returning and held until [Cursor.Close].
 func NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error) {
 	o := fileCursorOpts{
 		dirSync:  true,
@@ -97,7 +108,15 @@ func NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error) {
 	for _, fn := range opts {
 		fn(&o)
 	}
-	return &FileCursor{path: path, opts: o}, nil
+	c := &FileCursor{path: path, opts: o}
+	if o.flockPath != "" {
+		lk, err := acquireFlock(o.flockPath)
+		if err != nil {
+			return nil, err
+		}
+		c.lk = lk
+	}
+	return c, nil
 }
 
 func (c *FileCursor) Load(_ context.Context) (Checkpoint, bool, error) {
@@ -126,7 +145,12 @@ func (c *FileCursor) Save(_ context.Context, cp Checkpoint) error {
 	return atomicwrite.Write(c.path, data, c.opts.fileMode, c.opts.dirSync)
 }
 
-func (c *FileCursor) Close() error { return nil } // Phase 3 adds flock release
+func (c *FileCursor) Close() error {
+	if c.lk != nil {
+		return c.lk.release()
+	}
+	return nil
+}
 
 // MemoryCursor is an in-memory [Cursor] for tests.
 type memoryCursor struct {

@@ -158,6 +158,20 @@ func TestFileCursor_OversizeMeta(t *testing.T) {
 	}
 }
 
+// Flock tests are gated on unix so they don't run on unsupported platforms.
+
+func TestFileCursor_Flock_Conflict(t *testing.T) {
+	testFlockConflict(t)
+}
+
+func TestFileCursor_Flock_ReleasedOnClose(t *testing.T) {
+	testFlockReleasedOnClose(t)
+}
+
+func TestFileCursor_Flock_PIDInFile(t *testing.T) {
+	testFlockPIDInFile(t)
+}
+
 func FuzzCursorParse(f *testing.F) {
 	f.Add([]byte(`{"pos":{"file":"a","inode":"1","offset":"0"},"version":1}`))
 	f.Add([]byte(`{}`))

@@ -180,27 +180,27 @@ internal/
 
 ### Sub-tasks
 
-- [ ] `tail/source.go`: `Lumberjack(activePath string) Source` — recognizes lumberjack v2 backup naming `<base>-YYYY-MM-DDTHH-MM-SS.<ext>` (with optional `.gz` deferred to v2.1 per Decision #12). Sort backups oldest first, append active last.
-- [ ] `tail/source.go`: `Glob(active, backupGlob string) Source` — explicit glob for non-lumberjack rotators (e.g., `logrotate` numeric suffixes).
-- [ ] `tail/flock_unix.go` (`//go:build unix`): acquire via `syscall.Flock(fd, LOCK_EX|LOCK_NB)`, release on close. Write holder PID into the lock file (best-effort, not load-bearing).
-- [ ] `tail/flock_windows.go` (`//go:build windows`): acquire via `LockFileEx` with `LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY`. Range-lock the first byte.
-- [ ] `tail/cursor.go`: implement `WithFlock(lockPath string) FileCursorOption`. Lock acquired in `NewFileCursor`, released in `Cursor.Close`. **Sibling `.lock` file**, never the cursor itself (rename-over-open loses Linux locks per §5.4).
-- [ ] `tail/cursor.go`: `WithFlock("")` is a no-op (driving req allows lock-less).
-- [ ] `tail/tail.go`: implement `FallbackOldest` policy — when cursor names a file no longer in `Source.Enumerate`, resume at oldest still-present (offset 0) and fire `OnDropped(n)` with count of aged-off backups.
-- [ ] `tail/tail.go`: implement `WithoutInodeCheck()` option (delegates to `watch.Config.NoInodeCheck`).
-- [ ] `tailtest/`: separate package with stateful `MemorySource` (`Add(path)`, `Prune(path)`) for mid-tail rotation scenarios.
+- [x] `tail/source.go`: `Lumberjack(activePath string) Source` — recognizes lumberjack v2 backup naming `<base>-YYYY-MM-DDTHH-MM-SS.<ext>` (with optional `.gz` deferred to v2.1 per Decision #12). Sort backups oldest first, append active last.
+- [x] `tail/source.go`: `Glob(active, backupGlob string) Source` — explicit glob for non-lumberjack rotators (e.g., `logrotate` numeric suffixes).
+- [x] `tail/flock_unix.go` (`//go:build unix`): acquire via `syscall.Flock(fd, LOCK_EX|LOCK_NB)`, release on close. Write holder PID into the lock file (best-effort, not load-bearing).
+- [x] `tail/flock_windows.go` (`//go:build windows`): acquire via `LockFileEx` with `LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY`. Range-lock the first byte.
+- [x] `tail/cursor.go`: implement `WithFlock(lockPath string) FileCursorOption`. Lock acquired in `NewFileCursor`, released in `Cursor.Close`. **Sibling `.lock` file**, never the cursor itself (rename-over-open loses Linux locks per §5.4).
+- [x] `tail/cursor.go`: `WithFlock("")` is a no-op (driving req allows lock-less).
+- [x] `tail/tail.go`: implement `FallbackOldest` policy — when cursor names a file no longer in `Source.Enumerate`, resume at oldest still-present (offset 0) and fire `OnDropped(n)` with count of aged-off backups.
+- [x] `tail/tail.go`: implement `WithoutInodeCheck()` option (delegates to `watch.Config.NoInodeCheck`).
+- [x] `tailtest/`: separate package with stateful `MemorySource` (`Add(path)`, `Prune(path)`) for mid-tail rotation scenarios.
 
 ### Tests
 
-- [ ] `TestLumberjackSource_OrderedEnumeration` — `events.log` + 3 timestamped backups; assert oldest-first.
-- [ ] `TestLumberjackSource_NamingEdgeCases` — paths with no extension, paths with multiple dots, paths with non-matching siblings (must be ignored).
-- [ ] `TestGlobSource_Patterns` — verify glob matches expected files only.
-- [ ] `TestFileCursor_Flock_Conflict` — open two cursors on the same lock; second returns `ErrLockHeld`.
-- [ ] `TestFileCursor_Flock_ReleasedOnClose` — after `Close`, second cursor can acquire.
-- [ ] `TestFileCursor_Flock_PIDInFile` — assert lock file contains caller PID (string-decimal).
-- [ ] `TestTailer_MissingCheckpoint_FallbackOldest` — cursor names a deleted file; assert resume at oldest still-present, `OnDropped` fires with correct count.
-- [ ] `TestTailer_RotatesAcrossLumberjackBackups` — start mid-backup, drain it, advance to next, then to active. Assert `OnRotated` fires per transition.
-- [ ] Platform-tagged tests for flock semantics on linux/darwin/windows.
+- [x] `TestLumberjackSource_OrderedEnumeration` — `events.log` + 3 timestamped backups; assert oldest-first.
+- [x] `TestLumberjackSource_NamingEdgeCases` — paths with no extension, paths with multiple dots, paths with non-matching siblings (must be ignored).
+- [x] `TestGlobSource_Patterns` — verify glob matches expected files only.
+- [x] `TestFileCursor_Flock_Conflict` — open two cursors on the same lock; second returns `ErrLockHeld`.
+- [x] `TestFileCursor_Flock_ReleasedOnClose` — after `Close`, second cursor can acquire.
+- [x] `TestFileCursor_Flock_PIDInFile` — assert lock file contains caller PID (string-decimal).
+- [x] `TestTailer_MissingCheckpoint_FallbackOldest` — cursor names a deleted file; assert resume at oldest still-present, `OnDropped` fires with correct count.
+- [x] `TestTailer_RotatesAcrossLumberjackBackups` — start mid-backup, drain it, advance to next, then to active. Assert `OnRotated` fires per transition.
+- [x] Platform-tagged tests for flock semantics on linux/darwin/windows.
 
 **Deliverable:** L2 satisfies driving reqs 1, 3, 4. A consumer can adopt at L2 without L3.
 
