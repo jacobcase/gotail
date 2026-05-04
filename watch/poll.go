@@ -251,7 +251,7 @@ func (p *pollWatcher) rotate(newInode uint64) (Event, error) {
 	}
 
 	p.f = newFile
-	p.pos = 0
+	p.pos = 0 // rotation invariant: new file always starts at offset 0; Resume is one-shot (openFirst only)
 	p.inode = fileInode(newFi)
 	p.oldFile = oldFile // released at start of next Wait
 

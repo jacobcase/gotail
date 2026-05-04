@@ -23,6 +23,10 @@ type LineOptions struct {
 	MaxLine int
 	// KeepNewline includes the trailing \n in returned lines. Default false.
 	KeepNewline bool
+	// OnTruncated is called when the watcher detects that the file was truncated
+	// below the current read position. at is the position just before the reset.
+	// The callback fires before the reader seeks back to offset 0.
+	OnTruncated func(at Position)
 }
 
 // LineReader frames newline-delimited lines on top of a [Watcher]. It opens
@@ -133,6 +137,25 @@ func (l *LineReader) Next(ctx context.Context) (line []byte, pos Position, err e
 				}
 				continue
 			}
+			// Detect truncation the polling watcher may have missed: if our fd
+			// position is past the current file size, the file was truncated
+			// (and possibly rewritten) while the watcher's p.pos watermark was
+			// still below our position. This handles copytruncate scenarios
+			// where the new content is smaller than the old content.
+			if l.f != nil && l.pos.Offset > 0 {
+				if fi, serr := l.f.Stat(); serr == nil && fi.Size() < l.pos.Offset {
+					if l.opts.OnTruncated != nil {
+						l.opts.OnTruncated(l.pos)
+					}
+					l.head = 0
+					l.tail = 0
+					l.pos.Offset = 0
+					if _, err := l.f.Seek(0, io.SeekStart); err != nil {
+						return nil, l.pos, fmt.Errorf("watch: seek after truncation: %w", err)
+					}
+					continue
+				}
+			}
 			// Normal EOF on own fd: ask the Watcher for guidance.
 		}
 
@@ -151,7 +174,10 @@ func (l *LineReader) Next(ctx context.Context) (line []byte, pos Position, err e
 func (l *LineReader) handleEvent(ev Event) error {
 	switch {
 	case ev.Truncated:
-		// File was truncated; reset buffer and seek fd to beginning.
+		// File was truncated; fire hook with pre-truncation position, then reset.
+		if l.opts.OnTruncated != nil {
+			l.opts.OnTruncated(l.pos)
+		}
 		l.head = 0
 		l.tail = 0
 		l.pos.Offset = 0

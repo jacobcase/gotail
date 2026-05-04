@@ -606,3 +606,257 @@ func BenchmarkCursor_Save_NoDirSync(b *testing.B) {
 	}
 }
 
+
+// ── Phase 4: Rotation hardening tests ──────────────────────────────────────
+
+func TestRotation_Copytruncate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ct.log")
+	// Use content longer than replacement so size(new) < p.pos(old) guarantees
+	// the polling watcher detects the truncation regardless of timing.
+	if err := os.WriteFile(path, []byte("old content here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var truncatedAt tail.Position
+	opts := tail.Options{
+		Source:      tail.SingleFile(path),
+		Interval:    10 * time.Millisecond,
+		OnTruncated: func(at tail.Position) { truncatedAt = at },
+	}
+	tr := mustNew(t, opts)
+
+	rec1 := nextLine(t, ctx, tr)
+	if string(rec1.Line) != "old content here" {
+		t.Fatalf("want %q, got %q", "old content here", rec1.Line)
+	}
+
+	// Simulate copytruncate: truncate the file, write new content.
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("new\n")
+	f.Close()
+
+	rec2 := nextLine(t, ctx, tr)
+	if string(rec2.Line) != "new" {
+		t.Fatalf("want new after truncation, got %q", rec2.Line)
+	}
+
+	if truncatedAt.Offset == 0 {
+		t.Fatal("expected OnTruncated to fire with non-zero offset")
+	}
+}
+
+func TestRotation_MidWriteTruncate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trunc.log")
+	// Two lines only: after reading both the LR buffer is empty, so the
+	// truncation event cannot be masked by buffered-but-unread data.
+	if err := os.WriteFile(path, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var truncations int
+	opts := tail.Options{
+		Source:      tail.SingleFile(path),
+		Interval:    10 * time.Millisecond,
+		OnTruncated: func(_ tail.Position) { truncations++ },
+	}
+	tr := mustNew(t, opts)
+
+	// Read both lines, draining the buffer.
+	nextLine(t, ctx, tr)
+	nextLine(t, ctx, tr)
+
+	// Mid-stream truncate.
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := nextLine(t, ctx, tr)
+	if string(rec.Line) != "fresh" {
+		t.Fatalf("want fresh after mid-write truncate, got %q", rec.Line)
+	}
+	if truncations != 1 {
+		t.Fatalf("want 1 OnTruncated call, got %d", truncations)
+	}
+}
+
+func TestRotation_SymlinkSwap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	fileA := filepath.Join(dir, "a.log")
+	fileB := filepath.Join(dir, "b.log")
+	link := filepath.Join(dir, "current.log")
+
+	os.WriteFile(fileA, []byte("from-a\n"), 0o644)
+	os.WriteFile(fileB, []byte("from-b\n"), 0o644)
+	os.Symlink(fileA, link)
+
+	var rotations int
+	opts := tail.Options{
+		Source:    tail.SingleFile(link),
+		Interval:  10 * time.Millisecond,
+		OnRotated: func(_, _ tail.Position) { rotations++ },
+	}
+	tr := mustNew(t, opts)
+
+	rec1 := nextLine(t, ctx, tr)
+	if string(rec1.Line) != "from-a" {
+		t.Fatalf("want from-a, got %q", rec1.Line)
+	}
+
+	// Atomically swap the symlink.
+	tmpLink := link + ".tmp"
+	os.Symlink(fileB, tmpLink)
+	os.Rename(tmpLink, link)
+
+	rec2 := nextLine(t, ctx, tr)
+	if string(rec2.Line) != "from-b" {
+		t.Fatalf("want from-b after symlink swap, got %q", rec2.Line)
+	}
+}
+
+// TestProperty_AllBytesYieldedExactlyOnce is a quick-check-style property test:
+// for any sequence of lines written, the Tailer yields them all exactly once.
+func TestProperty_AllBytesYieldedExactlyOnce(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+
+	cases := [][]string{
+		{"hello", "world"},
+		{"single"},
+		{"a", "bb", "ccc", "dddd"},
+		{"", "nonempty", ""},
+		{"long line: " + string(make([]byte, 500))},
+	}
+
+	for _, lines := range cases {
+		path := filepath.Join(dir, "prop.log")
+		var content []byte
+		for _, l := range lines {
+			if l == "" {
+				continue // skip empty strings (no newline-terminated line)
+			}
+			content = append(content, []byte(l+"\n")...)
+		}
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		opts := tail.Options{
+			Source:    tail.SingleFile(path),
+			Interval:  5 * time.Millisecond,
+			StopAtEOF: true,
+		}
+		tr, err := tail.New(opts)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		var got []string
+		for rec, err := range tr.Records(ctx) {
+			if err != nil {
+				break
+			}
+			got = append(got, string(rec.Line))
+		}
+		tr.Close()
+
+		var want []string
+		for _, l := range lines {
+			if l != "" {
+				want = append(want, l)
+			}
+		}
+		if len(got) != len(want) {
+			t.Fatalf("input %v: want %d lines, got %d: %v", lines, len(want), len(got), got)
+		}
+		for i, w := range want {
+			if got[i] != w {
+				t.Fatalf("line[%d]: want %q, got %q", i, w, got[i])
+			}
+		}
+	}
+}
+
+// TestProperty_NoByteYieldedTwice verifies crash-restart durability:
+// read N lines, commit K, close, restart with same cursor, assert exactly
+// the remaining N-K lines are yielded.
+func TestProperty_NoByteYieldedTwice(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "crash.log")
+	const total = 20
+	var content []byte
+	for i := 0; i < total; i++ {
+		content = append(content, []byte("line\n")...)
+	}
+	os.WriteFile(path, content, 0o644)
+
+	for commit := 0; commit <= total; commit += 5 {
+		cur := tail.NewMemoryCursor()
+
+		opts1 := tail.Options{
+			Source:    tail.SingleFile(path),
+			Cursor:    cur,
+			Interval:  5 * time.Millisecond,
+			StopAtEOF: true,
+		}
+		tr1, _ := tail.New(opts1)
+		var lastPos tail.Position
+		for i := 0; i < commit; i++ {
+			rec, err := tr1.Next(ctx)
+			if err != nil {
+				break
+			}
+			lastPos = rec.Pos
+		}
+		if commit > 0 {
+			tr1.Commit(ctx, lastPos)
+		}
+		tr1.Close()
+
+		// Restart.
+		opts2 := tail.Options{
+			Source:    tail.SingleFile(path),
+			Cursor:    cur,
+			Interval:  5 * time.Millisecond,
+			StopAtEOF: true,
+		}
+		tr2, _ := tail.New(opts2)
+		var got int
+		for _, err := range tr2.Records(ctx) {
+			if err != nil {
+				break
+			}
+			got++
+		}
+		tr2.Close()
+
+		want := total - commit
+		if got != want {
+			t.Fatalf("commit=%d: want %d remaining lines, got %d", commit, want, got)
+		}
+	}
+}

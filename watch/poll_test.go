@@ -367,3 +367,43 @@ func TestPollingWatcher_Rotation(t *testing.T) {
 		t.Fatal("expected non-nil PreRotation on rotation event")
 	}
 }
+
+// TestRotation_NewFileStartsAtZero is a regression test for the invariant
+// that rotation always starts the new file at offset 0, regardless of any
+// Resume position that was set on the initial open.
+func TestRotation_NewFileStartsAtZero(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero.log")
+	writeFile(t, path, "initial\n")
+
+	// Resume from a non-zero position so that the watcher opens with seek.
+	resume := watch.Position{File: path, Offset: 4} // mid-line
+	c := watch.Config{Path: path, Interval: 10 * time.Millisecond, Resume: &resume}
+	w := mustNewPolling(t, c)
+
+	// Open event — position is 4 (resumed).
+	ev := waitEvent(t, ctx, w)
+	if !ev.ReOpened {
+		t.Fatal("expected ReOpened")
+	}
+
+	// Rotate to a new file.
+	rotate(t, path)
+	writeFile(t, path, "newfile\n")
+
+	// Drain any trailing-bytes event for the old file.
+	deadline := time.Now().Add(3 * time.Second)
+	for !ev.ReOpened || ev.Pos.Offset != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for rotation with offset=0; last ev=%+v", ev)
+		}
+		ev = waitEvent(t, ctx, w)
+	}
+	// The ReOpened event for the new file must have offset 0.
+	if ev.Pos.Offset != 0 {
+		t.Fatalf("new file after rotation must start at offset 0, got %d", ev.Pos.Offset)
+	}
+}

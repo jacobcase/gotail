@@ -188,7 +188,12 @@ func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) 
 	if err != nil {
 		return fmt.Errorf("tail: open %s: %w", path, err)
 	}
-	t.lr = watch.NewLineReader(w, watch.LineOptions{})
+	lrOpts := watch.LineOptions{}
+	if t.opts.OnTruncated != nil {
+		fn := t.opts.OnTruncated
+		lrOpts.OnTruncated = func(at watch.Position) { fn(at) }
+	}
+	t.lr = watch.NewLineReader(w, lrOpts)
 	return nil
 }
 
