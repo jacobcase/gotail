@@ -196,7 +196,11 @@ func TestForwarder_BatchByAge(t *testing.T) {
 func TestForwarder_RetryOnError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "log.txt")
-	writeLines(t, path, []string{"hello"})
+	// Use multiple records so the test would fail if a regression caused a
+	// retry to send a *different* batch (re-decode from stale buffer,
+	// off-by-one in batch slicing, etc.).
+	want := []string{"alpha", "beta", "gamma"}
+	writeLines(t, path, want)
 
 	tr := mustNewTailer(t, tail.Options{
 		Source:    tail.SingleFile(path),
@@ -204,14 +208,36 @@ func TestForwarder_RetryOnError(t *testing.T) {
 		StopAtEOF: true,
 	})
 
-	recording := &forwardtest.RecordingSink[[]byte]{}
-	failing := forwardtest.NewFailingSink[[]byte](2, nil, recording)
+	// Capture every batch that Send saw, including the failing attempts.
+	// FailingSink/RecordingSink only record successful calls, so use a
+	// purpose-built sink to assert byte-identity across retries.
+	var (
+		mu           sync.Mutex
+		sendBatches  [][]string
+		failsRemain  = 2
+		simulatedErr = errors.New("forwardtest: simulated sink failure")
+	)
+	sink := forward.SinkFunc[[]byte](func(_ context.Context, batch [][]byte) error {
+		cp := make([]string, len(batch))
+		for i, b := range batch {
+			cp[i] = string(b)
+		}
+		mu.Lock()
+		sendBatches = append(sendBatches, cp)
+		fails := failsRemain
+		failsRemain--
+		mu.Unlock()
+		if fails > 0 {
+			return simulatedErr
+		}
+		return nil
+	})
 
 	var sleepCalls int
 	fwd := mustNewForwarder(t, forward.Options[[]byte]{
 		Source:          tr,
 		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
-		Sink:            failing,
+		Sink:            sink,
 		MaxBatchRecords: 10,
 		InitialBackoff:  time.Millisecond,
 		OnBackoffSleep:  func(d time.Duration, attempt int) { sleepCalls++ },
@@ -224,16 +250,24 @@ func TestForwarder_RetryOnError(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if failing.Attempts() != 3 {
-		t.Fatalf("want 3 Send attempts, got %d", failing.Attempts())
+	if got := len(sendBatches); got != 3 {
+		t.Fatalf("want 3 Send attempts, got %d", got)
 	}
 	if sleepCalls != 2 {
 		t.Fatalf("want 2 OnBackoffSleep calls, got %d", sleepCalls)
 	}
-	// Cursor not advanced until success: check we got the record.
-	all := recording.All()
-	if len(all) != 1 || string(all[0]) != "hello" {
-		t.Fatalf("unexpected records: %v", all)
+
+	// Each retry must replay the *same* batch — same records, same order,
+	// no duplication or loss across attempts.
+	for i, got := range sendBatches {
+		if len(got) != len(want) {
+			t.Fatalf("attempt %d: want %d records, got %d (%v)", i, len(want), len(got), got)
+		}
+		for j, w := range want {
+			if got[j] != w {
+				t.Fatalf("attempt %d, record %d: want %q, got %q (full batch %v)", i, j, w, got[j], got)
+			}
+		}
 	}
 }
 
