@@ -43,19 +43,45 @@ func (m *memorySource) Enumerate(_ context.Context) ([]string, error) {
 	return m.paths, nil
 }
 
+// LumberjackOption is a functional option for [Lumberjack].
+type LumberjackOption func(*lumberjackSource)
+
+// WithLumberjackSkippedHook installs a callback that fires once per backup
+// file Lumberjack recognises but cannot expose to the tailer. The hook is
+// invoked synchronously from [Source.Enumerate]; it must not block.
+//
+// reason is a short tag identifying why the file was skipped:
+//   - "compressed": the file is a recognised lumberjack-with-compression
+//     backup (<stem>-<timestamp><ext>.gz). gotail does not decompress on
+//     read; the hook lets callers log, alert, or treat checkpoint resume
+//     against an aged-off backup as a hard error.
+func WithLumberjackSkippedHook(fn func(path, reason string)) LumberjackOption {
+	return func(s *lumberjackSource) { s.skipped = fn }
+}
+
 // Lumberjack returns a [Source] for log files rotated by
 // [lumberjack v2]. It recognises backup files named
 // <base>-YYYY-MM-DDTHH-MM-SS<ext> in the same directory as activePath,
 // returns them oldest-first, and appends activePath last.
 //
-// Compressed (.gz) backups are not yet supported and are silently ignored.
+// Compressed (.gz) backups are not enumerated. Use
+// [WithLumberjackSkippedHook] to observe them — for example, to alert
+// when a checkpoint resume would target a backup that has already been
+// compressed and aged out of reach.
 //
 // [lumberjack v2]: https://github.com/natefinish/lumberjack
-func Lumberjack(activePath string) Source {
-	return &lumberjackSource{activePath: activePath}
+func Lumberjack(activePath string, opts ...LumberjackOption) Source {
+	s := &lumberjackSource{activePath: activePath}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
-type lumberjackSource struct{ activePath string }
+type lumberjackSource struct {
+	activePath string
+	skipped    func(path, reason string) // optional
+}
 
 func (s *lumberjackSource) Enumerate(_ context.Context) ([]string, error) {
 	dir := filepath.Dir(s.activePath)
@@ -80,14 +106,20 @@ func (s *lumberjackSource) Enumerate(_ context.Context) ([]string, error) {
 			continue
 		}
 		n := e.Name()
-		// Must start with "stem-" and end with ext (possibly "").
 		if !strings.HasPrefix(n, prefix) {
+			continue
+		}
+		// Detect the .gz variant first so we can report it before the
+		// regular suffix check excludes it as "not matching ext".
+		if matchLumberjackCompressed(n, prefix, ext) {
+			if s.skipped != nil {
+				s.skipped(filepath.Join(dir, n), "compressed")
+			}
 			continue
 		}
 		if ext != "" && !strings.HasSuffix(n, ext) {
 			continue
 		}
-		// The timestamp portion between prefix and ext must be exactly 19 chars.
 		inner := n[len(prefix) : len(n)-len(ext)]
 		if len(inner) != 19 {
 			continue
@@ -112,6 +144,30 @@ func (s *lumberjackSource) Enumerate(_ context.Context) ([]string, error) {
 		result = append(result, b.path)
 	}
 	return append(result, s.activePath), nil
+}
+
+// matchLumberjackCompressed reports whether n is the .gz form of a
+// lumberjack backup (<prefix><19-char-ts><ext>.gz).
+func matchLumberjackCompressed(n, prefix, ext string) bool {
+	const gz = ".gz"
+	if !strings.HasSuffix(n, gz) {
+		return false
+	}
+	body := n[:len(n)-len(gz)]
+	if ext != "" && !strings.HasSuffix(body, ext) {
+		return false
+	}
+	if len(body) < len(prefix)+19+len(ext) {
+		return false
+	}
+	inner := body[len(prefix) : len(body)-len(ext)]
+	if len(inner) != 19 {
+		return false
+	}
+	if _, err := time.Parse("2006-01-02T15-04-05", inner); err != nil {
+		return false
+	}
+	return true
 }
 
 // Glob returns a [Source] for log files with an explicit backup glob pattern.

@@ -137,6 +137,68 @@ func TestLumberjackSource_NamingEdgeCases(t *testing.T) {
 	}
 }
 
+func TestLumberjackSource_CompressedBackupsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "events.log")
+
+	files := []string{
+		"events-2024-01-01T00-00-00.log",        // valid uncompressed backup
+		"events-2024-02-01T00-00-00.log.gz",     // compressed backup — skipped
+		"events-2024-02-15T00-00-00.log.gz",     // compressed backup — skipped
+		"events-not-a-timestamp.log.gz",         // not a lumberjack pattern; ignored silently
+		"events-2024-03-01T00-00-00.txt.gz",     // wrong ext; ignored silently
+	}
+	for _, n := range files {
+		touch(t, filepath.Join(dir, n))
+	}
+	touch(t, active)
+
+	var skipped []string
+	src := tail.Lumberjack(active, tail.WithLumberjackSkippedHook(func(path, reason string) {
+		if reason != "compressed" {
+			t.Errorf("unexpected reason %q for %q", reason, path)
+		}
+		skipped = append(skipped, filepath.Base(path))
+	}))
+	paths, err := src.Enumerate(context.Background())
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+
+	// Enumeration: one valid backup + active.
+	if len(paths) != 2 {
+		t.Fatalf("want 2 paths (valid backup + active), got %d: %v", len(paths), paths)
+	}
+	if filepath.Base(paths[0]) != "events-2024-01-01T00-00-00.log" {
+		t.Fatalf("paths[0] = %q", paths[0])
+	}
+	if paths[1] != active {
+		t.Fatalf("active must be last, got %q", paths[1])
+	}
+
+	// Hook fired once per .gz backup, in directory order.
+	if len(skipped) != 2 {
+		t.Fatalf("hook fired %d times, want 2: %v", len(skipped), skipped)
+	}
+}
+
+func TestLumberjackSource_NoHookByDefault(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "events.log")
+	touch(t, active)
+	touch(t, filepath.Join(dir, "events-2024-01-01T00-00-00.log.gz"))
+
+	// Construct without a hook; Enumerate must not panic on .gz files.
+	src := tail.Lumberjack(active)
+	paths, err := src.Enumerate(context.Background())
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != active {
+		t.Fatalf("want only [%s], got %v", active, paths)
+	}
+}
+
 func TestGlobSource_Patterns(t *testing.T) {
 	dir := t.TempDir()
 	active := filepath.Join(dir, "app.log")
