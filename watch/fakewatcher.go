@@ -6,10 +6,9 @@ import (
 )
 
 type fakeWatcher struct {
-	path    string
-	pos     Position
-	opened  bool
-	closed  bool
+	path   string
+	pos    Position
+	opened bool
 }
 
 // FakeWatcher returns a [Watcher] that emits a single ReOpened event for path
@@ -21,8 +20,8 @@ func FakeWatcher(path string, pos Position) Watcher {
 }
 
 func (f *fakeWatcher) Wait(ctx context.Context) (Event, error) {
-	if f.closed {
-		return Event{}, io.EOF
+	if err := ctx.Err(); err != nil {
+		return Event{}, err
 	}
 	if !f.opened {
 		f.opened = true
@@ -32,14 +31,7 @@ func (f *fakeWatcher) Wait(ctx context.Context) (Event, error) {
 			ReOpened: true,
 		}, nil
 	}
-	// Subsequent calls: block on ctx or return EOF if StopAtEOF semantics.
-	select {
-	case <-ctx.Done():
-		return Event{}, ctx.Err()
-	}
+	return Event{}, io.EOF
 }
 
-func (f *fakeWatcher) Close() error {
-	f.closed = true
-	return nil
-}
+func (f *fakeWatcher) Close() error { return nil }
