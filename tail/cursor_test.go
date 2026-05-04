@@ -60,10 +60,21 @@ func TestFileCursor_NotFound(t *testing.T) {
 	}
 }
 
-func TestFileCursor_AtomicSave(t *testing.T) {
+// TestFileCursor_StaleTmpDoesNotCorrupt exercises the atomicwrite contract:
+// the canonical cursor path is either fully old or fully new on disk, never
+// partial. We can't directly induce a crash mid-rename in-process, but the
+// observable post-condition — a leftover .tmp from an interrupted write —
+// is reproducible. Load must ignore the .tmp, and a subsequent Save must
+// replace it cleanly.
+func TestFileCursor_StaleTmpDoesNotCorrupt(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "atomic.cursor")
+
+	// Pre-existing stale tmp from a hypothetical crashed Save.
+	if err := os.WriteFile(path+".tmp", []byte(`{"pos":"garbage`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	c, err := tail.NewFileCursor(path)
 	if err != nil {
@@ -71,29 +82,27 @@ func TestFileCursor_AtomicSave(t *testing.T) {
 	}
 	defer c.Close()
 
+	// Canonical path is missing → Load reports not-found regardless of .tmp.
+	if _, found, err := c.Load(ctx); err != nil {
+		t.Fatalf("Load before Save: %v", err)
+	} else if found {
+		t.Fatal("Load returned found=true when only a stale .tmp existed")
+	}
+
 	cp1 := tail.Checkpoint{Pos: watch.Position{File: "a", Inode: 1, Offset: 100}}
 	if err := c.Save(ctx, cp1); err != nil {
-		t.Fatalf("first Save: %v", err)
+		t.Fatalf("Save: %v", err)
 	}
 
-	// Remove the tmp file between writes to simulate a crash mid-rename.
-	tmp := path + ".tmp"
-	_ = os.Remove(tmp) // no-op if it doesn't exist; simulates post-rename cleanup
-
-	// The on-disk file must still be fully the first checkpoint (or absent).
-	data, err := os.ReadFile(path)
+	got, found, err := c.Load(ctx)
 	if err != nil {
-		t.Fatalf("read after simulated crash: %v", err)
+		t.Fatalf("Load after Save: %v", err)
 	}
-	// Verify it is valid JSON containing the first checkpoint.
-	var cf struct {
-		Pos watch.Position `json:"pos"`
+	if !found {
+		t.Fatal("Load: expected found=true after Save")
 	}
-	if err := json.Unmarshal(data, &cf); err != nil {
-		t.Fatalf("invalid JSON after crash simulation: %v", err)
-	}
-	if cf.Pos != cp1.Pos {
-		t.Fatalf("want pos %+v, got %+v", cp1.Pos, cf.Pos)
+	if got.Pos != cp1.Pos {
+		t.Fatalf("got %+v, want %+v", got.Pos, cp1.Pos)
 	}
 }
 
