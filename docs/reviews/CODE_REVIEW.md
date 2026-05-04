@@ -1,6 +1,7 @@
 # gotail v2 — End-to-End Review
 
 - **Conducted:** 2026-05-04
+- **Closed:** 2026-05-04
 
 Overall this is a careful, well-structured codebase. The layering (watch / tail / forward) is honest — each layer is independently importable, the v1 race-aware drain semantics are preserved and pinned by tests, and the public API uses modern Go (`iter.Seq2`, generics on L3, `slog`, `ctx`-on-blocking, sentinel errors). What follows is concentrated on the things worth fixing.
 
