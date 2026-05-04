@@ -260,7 +260,14 @@ func (t *Tailer) advance(ctx context.Context) error {
 
 	nextIdx := t.fileIdx + 1
 	if nextIdx >= len(t.files) {
-		t.doneOnce.Do(func() { close(t.done) })
+		// Defensive: advance() is only entered when !atActive, and we set
+		// atActive on the transition to the last file, so this branch is
+		// not reached under normal flow. A custom Source with finite
+		// enumeration could still reach it. Only close done in StopAtEOF
+		// mode; live-tail callers don't expect Done() to fire spontaneously.
+		if t.opts.StopAtEOF {
+			t.doneOnce.Do(func() { close(t.done) })
+		}
 		return ErrSourceExhausted
 	}
 
@@ -406,8 +413,11 @@ func (t *Tailer) Position() Position {
 	return t.cur
 }
 
-// Done is closed when the source is exhausted in StopAtEOF mode.
-// In live-tail mode it is never closed by the Tailer itself.
+// Done is closed when the file series is fully exhausted in StopAtEOF mode —
+// either the active file reached EOF, or a finite Source's enumeration was
+// walked off the end. In live-tail mode (StopAtEOF=false) the Tailer never
+// closes Done itself; callers signal shutdown via [Tailer.Close] and observe
+// it through the regular error path.
 func (t *Tailer) Done() <-chan struct{} {
 	return t.done
 }
