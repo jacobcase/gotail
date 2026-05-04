@@ -112,7 +112,10 @@ func (s *lumberjackSource) Enumerate(_ context.Context) ([]string, error) {
 			continue
 		}
 		// Detect the .gz variant first so we can report it before the
-		// regular suffix check excludes it as "not matching ext".
+		// regular suffix check excludes it as "not matching ext". A
+		// checkpoint resume that names a compressed backup will then
+		// fall to OnMissingCheckpoint — the operational case the hook
+		// exists to surface.
 		if matchLumberjackCompressed(n, prefix, ext) {
 			if s.skipped != nil {
 				s.skipped(filepath.Join(dir, n), "compressed")

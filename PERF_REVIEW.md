@@ -340,10 +340,9 @@ terminates cleanly. Correct.
 
 The **lumberjack `.gz` skip** at `tail/source.go:114-120` reports
 compressed files via the hook before the regular suffix check excludes
-them. Correct, but the comment block could note that this means a
-checkpoint resume targeting a compressed backup will fall to
-`OnMissingCheckpoint` — that's the operationally interesting case the
-hook lets users alert on.
+them. Correct. Inline comment now also notes that a checkpoint resume
+naming a compressed backup falls to `OnMissingCheckpoint` — the
+operational case the hook exists to surface.
 
 The **`atomicwrite` sequence** (write → fsync file → close → rename →
 fsync dir) at `internal/atomicwrite/atomicwrite.go:21-53` is the
