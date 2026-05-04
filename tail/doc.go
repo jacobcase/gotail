@@ -26,6 +26,21 @@
 // fsynced, then renamed over the final path. An optional directory fsync
 // (default on) makes the rename itself durable against power loss.
 //
+// # On-disk format
+//
+// Checkpoints are JSON. The schema is a wire-format commitment — files
+// written by one version of gotail must remain readable by future versions.
+// Notable details:
+//
+//   - The 64-bit fields of [Position] (Inode, Offset) are encoded as quoted
+//     strings (`json:"...,string"`). Many JSON consumers parse numbers as
+//     IEEE-754 doubles, which silently lose precision past 2^53. Quoting
+//     them preserves full int64 fidelity.
+//   - [Checkpoint.Version] is written as 1 today and validated on Load;
+//     bumping it requires migration support in future versions.
+//   - [Checkpoint.Meta] is opaque [json.RawMessage] passed through verbatim.
+//     Schema discipline for Meta is the caller's responsibility.
+//
 // # Usage
 //
 //	cur, _ := tail.NewFileCursor("/var/run/myapp.cursor")
