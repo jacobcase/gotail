@@ -1,4 +1,4 @@
-//go:build gotail_fsnotify && (linux || darwin || freebsd || netbsd || openbsd)
+//go:build !gotail_nofsnotify && (linux || darwin || freebsd || netbsd || openbsd)
 
 package watch
 
@@ -32,7 +32,8 @@ type fsnotifyWatcher struct {
 }
 
 // NewFsnotify returns a Watcher backed by OS file notifications (inotify on
-// Linux, kqueue on macOS/BSD). Enable with: go build -tags gotail_fsnotify
+// Linux, kqueue on macOS/BSD). It is compiled in by default; opt out with
+// the gotail_nofsnotify build tag.
 //
 // It watches the parent directory so it detects creation of files that do not
 // yet exist at construction time.

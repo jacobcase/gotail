@@ -124,18 +124,22 @@ if err := fwd.Run(ctx); err != nil { ... }
 
 ## Platform support
 
-| Platform | Polling | fsnotify (`-tags gotail_fsnotify`) |
-|----------|---------|-------------------------------------|
+| Platform | Polling | fsnotify (default) |
+|----------|---------|--------------------|
 | Linux | ✓ | ✓ (inotify) |
 | macOS | ✓ | ✓ (kqueue) |
-| Windows | ✓ | — (polling only) |
 | FreeBSD / OpenBSD / NetBSD | ✓ | ✓ (kqueue) |
+| Windows | ✓ | — (polling only) |
 
-The `gotail_fsnotify` build tag enables OS-native events for sub-millisecond
-latency. Default builds are zero-dependency (no `fsnotify` in the module graph).
+The fsnotify backend is compiled in by default and selected automatically
+when supported, with transparent fallback to polling on Windows or when
+events are unavailable. To force polling at runtime, set
+`tail.Options{ForcePolling: true}`. To drop the `fsnotify` dependency
+entirely (e.g., for distroless / minimal builds), opt out with the
+`gotail_nofsnotify` build tag:
 
 ```
-go build -tags gotail_fsnotify ./...
+go build -tags gotail_nofsnotify ./...
 ```
 
 ## CLI

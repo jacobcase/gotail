@@ -51,9 +51,11 @@ type Options struct {
 	Logger *slog.Logger
 	// Interval is the poll interval. Zero defaults to 1 second.
 	Interval time.Duration
-	// UseFsnotify requests the fsnotify backend when available. Falls back to
-	// polling.
-	UseFsnotify bool
+	// ForcePolling disables the fsnotify backend even when it is compiled
+	// in. Default is auto: the Tailer prefers fsnotify and falls back to
+	// polling on platforms or builds where fsnotify is unavailable
+	// (gotail_nofsnotify build tag, or unsupported OS).
+	ForcePolling bool
 	// Whence controls the initial seek position for the first file opened.
 	// Must be [io.SeekStart], [io.SeekCurrent], or [io.SeekEnd].
 	// Zero (io.SeekStart) reads from the beginning; [io.SeekEnd] skips
@@ -213,10 +215,10 @@ func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) 
 	}
 	var w watch.Watcher
 	var err error
-	if t.opts.UseFsnotify {
-		w, err = watch.New(wc)
-	} else {
+	if t.opts.ForcePolling {
 		w, err = watch.NewPolling(wc)
+	} else {
+		w, err = watch.New(wc)
 	}
 	if err != nil {
 		return fmt.Errorf("tail: open %s: %w", path, err)

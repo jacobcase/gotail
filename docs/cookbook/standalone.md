@@ -54,5 +54,7 @@ func main() {
   past the next `Next` call.
 - `watch.LineOptions.KeepNewline` includes the trailing `\n` in the returned
   slice if you need it.
-- Switch to `watch.New` instead of `watch.NewPolling` and build with
-  `-tags gotail_fsnotify` for OS-native, sub-millisecond event latency.
+- Switch to `watch.New` instead of `watch.NewPolling` for OS-native,
+  sub-millisecond event latency. The fsnotify backend is compiled in by
+  default; `watch.New` falls back to polling when unavailable. Drop the
+  dependency with `-tags gotail_nofsnotify` if needed.

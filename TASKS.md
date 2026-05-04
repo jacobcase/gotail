@@ -124,7 +124,7 @@ internal/
 
 - [x] `tail/tail.go`: type alias `Position = watch.Position` (Decision #21).
 - [x] `tail/tail.go`: define `Record` struct (`Line []byte`, `Pos Position`). Doc that `Line` is valid until next iteration.
-- [x] `tail/tail.go`: define `Options` per §4 (Source, Cursor, Logger, Interval, UseFsnotify=false, StopAtEOF, OnMissingCheckpoint, hooks: OnDropped, OnRotated, OnError, OnTruncated, OnCheckpoint).
+- [x] `tail/tail.go`: define `Options` per §4 (Source, Cursor, Logger, Interval, ForcePolling=false, StopAtEOF, OnMissingCheckpoint, hooks: OnDropped, OnRotated, OnError, OnTruncated, OnCheckpoint).
 - [x] `tail/tail.go`: define `MissingPolicy` enum (`FallbackOldest` default, `Fail`, `SkipToActive`).
 - [x] `tail/source.go`: define `Source` interface: `Enumerate(ctx) ([]string, error)`. Order: oldest first, active last.
 - [x] `tail/source.go`: `SingleFile(path string) Source` — returns `[]string{path}`.
@@ -313,17 +313,17 @@ forwardtest/
 
 ### Sub-tasks
 
-- [ ] `watch/fsnotify_unix.go` (`//go:build gotail_fsnotify && (linux || darwin || freebsd || netbsd || openbsd)`): `NewFsnotify(c Config) (Watcher, error)` using `github.com/fsnotify/fsnotify`. Watch parent directory (fsnotify can't watch nonexistent files); react to create/rename/write/remove on the named path.
-- [ ] `watch/fsnotify_stub.go` (`//go:build !gotail_fsnotify`): `func NewFsnotify(c Config) (Watcher, error) { return nil, ErrUnsupported }`.
+- [ ] `watch/fsnotify_unix.go` (`//go:build !gotail_nofsnotify && (linux || darwin || freebsd || netbsd || openbsd)`): `NewFsnotify(c Config) (Watcher, error)` using `github.com/fsnotify/fsnotify`. Watch parent directory (fsnotify can't watch nonexistent files); react to create/rename/write/remove on the named path.
+- [ ] `watch/fsnotify_stub.go` (`//go:build gotail_nofsnotify || !(linux || darwin || freebsd || netbsd || openbsd)`): `func NewFsnotify(c Config) (Watcher, error) { return nil, ErrUnsupported }`.
 - [ ] `watch/watch.go`: `New(c Config) (Watcher, error)` — try `NewFsnotify`; on `ErrUnsupported` fall back to `NewPolling`. Log the choice via `c.Logger`.
-- [ ] Add `github.com/fsnotify/fsnotify` to `go.mod` (only pulled in by build-tagged files; `go mod tidy` keeps it out of default builds via standard module graph rules — verify with a no-tag build).
-- [ ] Wire `tail.Options.UseFsnotify` to switch between `NewPolling` and `New` (or `NewFsnotify` directly).
+- [ ] Add `github.com/fsnotify/fsnotify` to `go.mod` (default builds pull it in; `-tags gotail_nofsnotify` selects the stub and drops the dep).
+- [ ] Wire `tail.Options.ForcePolling` to switch between `NewPolling` (when true) and `New` (default).
 
 ### Tests
 
 - [ ] `TestFsnotify_FallbackToPolling` (build-tagged) — mock fsnotify error; assert fallback constructor falls back.
-- [ ] `TestInotifyBackend` (`//go:build linux && gotail_fsnotify`) — basic write-detect.
-- [ ] `TestKqueueBackend` (`//go:build darwin && gotail_fsnotify`) — basic write-detect.
+- [ ] `TestInotifyBackend` (`//go:build linux && !gotail_nofsnotify`) — basic write-detect.
+- [ ] `TestKqueueBackend` (`//go:build darwin && !gotail_nofsnotify`) — basic write-detect.
 - [ ] `TestWindowsFileID` (`//go:build windows`) — verify `GetFileInformationByHandle` produces stable IDs across opens.
 - [ ] `TestWindowsRotation` (`//go:build windows`) — rename+create rotation on NTFS.
 
@@ -339,7 +339,7 @@ forwardtest/
 
 ### Sub-tasks
 
-- [ ] Rewrite `README.md`: v2 package layout, quickstart per layer, v1→v2 migration table (§8), `gotail_fsnotify` build tag note, link to docs/.
+- [ ] Rewrite `README.md`: v2 package layout, quickstart per layer, v1→v2 migration table (§8), `gotail_nofsnotify` opt-out tag note, link to docs/.
 - [ ] `docs/metrics-prometheus.md` — wire each L2/L3 hook to a Prometheus collector. Code-only docs, no library dep.
 - [ ] `docs/metrics-otel.md` — same for OpenTelemetry.
 - [ ] `docs/cookbook/https-forwarder.md` — full worked example: lumberjack writer + `tail.Lumberjack` + `forward.Forwarder` + mTLS HTTP sink.

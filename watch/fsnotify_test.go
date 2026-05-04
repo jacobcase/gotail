@@ -1,4 +1,4 @@
-//go:build gotail_fsnotify && (linux || darwin || freebsd || netbsd || openbsd)
+//go:build !gotail_nofsnotify && (linux || darwin || freebsd || netbsd || openbsd)
 
 package watch_test
 
@@ -88,7 +88,7 @@ func TestFsnotify_WriteEvent(t *testing.T) {
 }
 
 func TestFsnotify_FallbackToPolling(t *testing.T) {
-	// When UseFsnotify is false, tail.New uses NewPolling directly.
+	// When ForcePolling is true, tail.New uses NewPolling directly.
 	// This test verifies watch.New falls back correctly when we request
 	// the fsnotify backend for a valid path (i.e., no error expected).
 	dir := t.TempDir()

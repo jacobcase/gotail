@@ -129,8 +129,8 @@ github.com/jacobcase/gotail/
 ├── watch/                  L1 — file-as-stream primitives
 │   ├── watch.go            Watcher, Event, PreRotation, Position, Config
 │   ├── poll.go             Polling implementation (always available)
-│   ├── fsnotify_unix.go    fsnotify implementation (build tag: gotail_fsnotify)
-│   ├── fsnotify_stub.go    Stub returning ErrUnsupported (negation of above tag)
+│   ├── fsnotify_unix.go    fsnotify implementation (default; opt out with gotail_nofsnotify)
+│   ├── fsnotify_stub.go    Stub returning ErrUnsupported (Windows / opt-out)
 │   ├── stat_unix.go        Inode extraction on Unix
 │   ├── stat_windows.go     File-ID extraction on Windows (GetFileInformationByHandle)
 │   └── linereader.go       Line framing on top of a Watcher
@@ -347,7 +347,7 @@ type Options struct {
     Cursor              Cursor             // nil = no persistence (acts like L1)
     Logger              *slog.Logger
     Interval            time.Duration
-    UseFsnotify         bool
+    ForcePolling        bool
 
     StopAtEOF           bool
     OnMissingCheckpoint MissingPolicy
@@ -524,9 +524,9 @@ var ErrPermanent = errors.New("forward: permanent sink error")
 | Backend | Available on | Latency | CPU at idle | Notes |
 |---|---|---|---|---|
 | `polling` | All platforms | `Interval` (default 1s) | One stat per interval per file | Always works. The default. |
-| `fsnotify` | Linux (inotify), macOS (kqueue/FSEvents via fsnotify), *BSD (kqueue), Windows (ReadDirectoryChangesW) | <1 ms typical | ~0 | Build-tagged; doesn't pull the dep unless asked. Falls back to polling on backends where fsnotify reports unsupported. |
+| `fsnotify` | Linux (inotify), macOS (kqueue/FSEvents via fsnotify), *BSD (kqueue), Windows (ReadDirectoryChangesW) | <1 ms typical | ~0 | Default backend; falls back to polling on platforms where fsnotify reports unsupported. Opt out of the dep entirely with `-tags gotail_nofsnotify`. |
 
-**Recommendation: keep polling as default.** Polling is what every consumer of v1 already runs. fsnotify is strictly a latency-and-idle-CPU optimization, not a correctness improvement. For write-heavy logs the difference is marginal; for low-volume audit logs it's significant. Make it opt-in via `tail.Options.UseFsnotify = true` or `watch.NewFsnotify(c)`.
+**Recommendation: fsnotify on by default with auto-fallback.** Distroless / minimal builds can drop the dep with `-tags gotail_nofsnotify`; runtime opt-out per-Tailer is `tail.Options.ForcePolling = true`.
 
 **API sketch:**
 
@@ -541,10 +541,10 @@ func watch.NewFsnotify(c Config) (Watcher, error)  // ErrUnsupported if not buil
 
 **Build tag scheme:**
 
-- Default build: pure stdlib, polling only.
-- `-tags gotail_fsnotify`: pulls in `github.com/fsnotify/fsnotify`, enables `NewFsnotify`.
+- Default build: fsnotify backend included, `watch.New` prefers fsnotify with polling fallback.
+- `-tags gotail_nofsnotify`: drops `github.com/fsnotify/fsnotify` from the module graph, `NewFsnotify` returns `ErrUnsupported`, `watch.New` falls back to polling.
 
-This preserves the "minimal dependencies" constraint by default while letting fsnotify users opt in. Document this prominently in the README.
+This makes "fsnotify just works" the default while preserving an escape hatch for distroless / dependency-minimal builds. Document this in the README.
 
 **Why not write fsnotify ourselves?** We could. Linux inotify is ~150 LOC of `unix.InotifyInit1` etc.; macOS kqueue is similar; Windows is `ReadDirectoryChangesW`. But fsnotify (the project) has fixed dozens of platform-specific edge cases over a decade — kqueue rename semantics, Windows path normalization, Linux event coalescing. Re-implementing risks reproducing bugs that are already fixed. Build-tag in fsnotify, but make the dep optional.
 
@@ -1326,11 +1326,11 @@ Suggested ordering. Each phase is independently mergeable and reviewable. Estima
 
 ### Phase 6 — fsnotify backend (optional, ~250 LOC + ~150 LOC tests)
 
-- Implement `watch.NewFsnotify` behind `gotail_fsnotify` build tag.
+- Implement `watch.NewFsnotify`. Default-on; opt out with the `gotail_nofsnotify` build tag.
 - Implement `watch.New` with auto-fallback to polling.
-- Tests for the fsnotify path (build-tagged).
+- Tests for the fsnotify path (gated on the same negative tag).
 
-**Deliverable:** sub-millisecond latency for users who opt in.
+**Deliverable:** sub-millisecond latency by default, with an escape hatch for distroless builds.
 
 ### Phase 7 — Polish & docs (~100 LOC code + lots of prose)
 
