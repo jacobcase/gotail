@@ -133,6 +133,102 @@ func TestTailer_MissingCheckpoint_Fail(t *testing.T) {
 	}
 }
 
+// TestTailer_NoInodeCheck_PrefersCursorPath pins the §11.4 #1 fix: under
+// NoInodeCheck the tie-break prefers the file the cursor named over the
+// first-existing fallback. Without the fix, a multi-file source would
+// resume at the oldest file regardless of which file the cursor named —
+// silent rotation drift on filesystems with unstable inodes.
+func TestTailer_NoInodeCheck_PrefersCursorPath(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	oldest := filepath.Join(dir, "oldest.log")
+	active := filepath.Join(dir, "active.log")
+	if err := os.WriteFile(oldest, []byte("oldA\noldB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(active, []byte("newA\nnewB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cur := tail.NewMemoryCursor()
+	// Cursor named the active file (offset 0). Inode is 0 — meaningless under
+	// NoInodeCheck, but the fix must still pick `active` because it's the
+	// named path.
+	_ = cur.Save(context.Background(), tail.Checkpoint{
+		Pos: tail.Position{File: active, Inode: 0, Offset: 0},
+	})
+
+	opts := tail.Options{
+		Source:       tail.StaticSource([]string{oldest, active}),
+		Cursor:       cur,
+		Interval:     10 * time.Millisecond,
+		StopAtEOF:    true,
+		NoInodeCheck: true,
+	}
+	tr := mustNew(t, opts)
+
+	var got []string
+	for rec, err := range tr.Records(ctx) {
+		if err != nil {
+			if err == tail.ErrSourceExhausted {
+				break
+			}
+			t.Fatalf("Records: %v", err)
+		}
+		got = append(got, string(rec.Line))
+	}
+	// The first record must come from `active`, not `oldest`. Without the
+	// path-first tie-break this would yield "oldA" first.
+	if len(got) == 0 || got[0] != "newA" {
+		t.Fatalf("first record: got %q (full %v), want first record from active.log", got[0], got)
+	}
+}
+
+// TestTailer_NoInodeCheck_FallbackWhenPathGone confirms that when the cursor's
+// named file is no longer in the source enumeration, the fallback (first
+// existing) still works.
+func TestTailer_NoInodeCheck_FallbackWhenPathGone(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	active := filepath.Join(dir, "active.log")
+	if err := os.WriteFile(active, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cur := tail.NewMemoryCursor()
+	gonePath := filepath.Join(dir, "gone.log")
+	_ = cur.Save(context.Background(), tail.Checkpoint{
+		Pos: tail.Position{File: gonePath, Inode: 0, Offset: 0},
+	})
+
+	opts := tail.Options{
+		Source:              tail.StaticSource([]string{active}),
+		Cursor:              cur,
+		Interval:            10 * time.Millisecond,
+		StopAtEOF:           true,
+		NoInodeCheck:        true,
+		OnMissingCheckpoint: tail.FallbackOldest,
+	}
+	tr := mustNew(t, opts)
+	count := 0
+	for _, err := range tr.Records(ctx) {
+		if err != nil {
+			if err == tail.ErrSourceExhausted {
+				break
+			}
+			t.Fatalf("Records: %v", err)
+		}
+		count++
+	}
+	if count != 1 {
+		t.Fatalf("want 1 line from fallback, got %d", count)
+	}
+}
+
 // TestTailer_FailOnInodeMismatch_ReturnsSentinel pins the §3 ext-row
 // requirement that ErrInodeMismatch is reachable as a public sentinel.
 // When the cursor's named file still exists but has a different inode

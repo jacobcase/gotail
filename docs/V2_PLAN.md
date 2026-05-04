@@ -1546,19 +1546,7 @@ fix issues the plan ignored; some pre-empt v2.1 items.
 
 ### 11.4 Subtle semantic deviations
 
-1. **`findFileByInode` with `noInodeCheck = true` returns the first
-   *existing* file’s index.** The plan describes `WithoutInodeCheck()` as
-   “disables the equality check entirely” without specifying tie-break
-   behaviour. The shipped semantics are: walk `files` in order, return
-   the first one for which `StatInode` succeeds. On a series with multiple
-   present files this lands resume at the *oldest still-present* file
-   regardless of which path the cursor named. Combined with the inode-0
-   ambiguity on Windows, this can mask a real rotation drift.
-   *Driver:* [CODE_REVIEW §1 (Windows inode is always 0)](./reviews/CODE_REVIEW.md) is the
-   foundational issue; the noInodeCheck tie-break behaviour predates the
-   review and remains the workaround until the Windows inode wiring is
-   fixed.
-2. **Whence one-shot uses an internal flag, not field mutation.**
+1. **Whence one-shot uses an internal flag, not field mutation.**
    `tail.openFile` clears `t.whenceUsed` rather than zeroing
    `Options.Whence`. The plan didn’t specify either way, but the
    never-mutate-Options choice is explicit.
@@ -1566,7 +1554,7 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    which recommended a private flag instead of mutating embedded options;
    PERF_REVIEW’s goroutines/channels inventory likewise endorses the
    private-flag style.
-3. **`Tailer.Position()` returns the most-recently-yielded record’s
+2. **`Tailer.Position()` returns the most-recently-yielded record’s
    position, not a “current logical position without consuming.”** Plan
    §4 L2 wording suggests the latter. In practice these are the same value
    between calls to `Next`, but a hook running mid-`Next` (e.g., `OnTruncated`)

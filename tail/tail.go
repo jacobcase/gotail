@@ -205,7 +205,7 @@ func New(ctx context.Context, opts Options) (*Tailer, error) {
 		if found {
 			lastMeta = cp.Meta
 			// Find which file in the series matches the checkpoint inode.
-			matchIdx := findFileByInode(files, cp.Pos.Inode, opts.NoInodeCheck)
+			matchIdx := findFileByInode(files, cp.Pos.Inode, cp.Pos.File, opts.NoInodeCheck)
 
 			if matchIdx >= 0 {
 				startIdx = matchIdx
@@ -299,16 +299,41 @@ func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) 
 }
 
 // findFileByInode returns the index in files whose inode matches want, or -1.
-// When noInodeCheck is true, the first existing file is treated as a match
-// (used for filesystems without stable inodes — ReFS, some FUSE mounts).
-func findFileByInode(files []string, want uint64, noInodeCheck bool) int {
+//
+// When noInodeCheck is true (filesystems without stable inodes — ReFS, some
+// FUSE mounts), the inode check is skipped. In that case the tie-break is:
+//  1. Prefer the file whose path equals wantPath (the cursor's named file)
+//     if it still exists in the current enumeration.
+//  2. Otherwise return the first existing file (oldest-existing fallback).
+//
+// The path-first tie-break prevents resume from landing at the wrong file
+// when the cursor named a still-present file but the source enumeration
+// also contains older files.
+func findFileByInode(files []string, want uint64, wantPath string, noInodeCheck bool) int {
+	if noInodeCheck {
+		// Path-first tie-break: prefer the cursor's named file when present.
+		if wantPath != "" {
+			for i, path := range files {
+				if path != wantPath {
+					continue
+				}
+				if _, err := watch.StatInode(path); err == nil {
+					return i
+				}
+			}
+		}
+		// Fallback: first existing file.
+		for i, path := range files {
+			if _, err := watch.StatInode(path); err == nil {
+				return i
+			}
+		}
+		return -1
+	}
 	for i, path := range files {
 		cur, err := watch.StatInode(path)
 		if err != nil {
 			continue // file may not exist yet
-		}
-		if noInodeCheck {
-			return i
 		}
 		if cur == want {
 			return i
