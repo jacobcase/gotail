@@ -93,6 +93,10 @@ type Options struct {
 	OnDropped        func(droppedFiles int)
 	OnRotated        func(from, to Position)
 	OnError          func(err error)
+	// OnTruncated may fire from two paths: the watcher's truncation event,
+	// and a late-detection check inside LineReader.Next when the file's size
+	// has dropped below the current offset (defensive against copytruncate
+	// races the watcher missed). Hooks must be idempotent across both sites.
 	OnTruncated      func(at Position)
 	OnCheckpoint     func(c Checkpoint)
 	OnInodeMismatch  func(want, got uint64)
@@ -499,7 +503,11 @@ func (t *Tailer) CommitWithMeta(ctx context.Context, pos Position, meta any) err
 	return nil
 }
 
-// Position returns the position of the most recently yielded record.
+// Position returns the position of the most recently yielded record — the
+// post-yield invariant the cursor commits against. Between calls to Next
+// this matches the live read position; inside a hook firing mid-Next (e.g.
+// OnTruncated) it may not yet reflect the in-flight event, since t.cur is
+// assigned after a record is yielded, not after each watcher event.
 // Safe to call from any goroutine.
 func (t *Tailer) Position() Position {
 	t.mu.Lock()

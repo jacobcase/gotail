@@ -100,7 +100,7 @@ This shape covers log forwarders (Vector / Fluent Bit / Promtail-style), event-t
 | ext | Memory-backed adapters for tests | `tail.NewMemoryCursor()`, `tail.MemorySource()`, `watch.FakeWatcher()`, `forwardtest.RecordingSink[T]` / `FailingSink[T]` | All |
 | ext | Iterator form | `Tailer.Records(ctx) iter.Seq2[Record, error]` | L2 |
 | ext | Pull-style escape hatch | `Tailer.Next(ctx) (Record, error)` | L2 |
-| ext | Inode opt-out for Windows/weird FS | `tail.WithoutInodeCheck()` option | L2 |
+| ext | Inode opt-out for Windows/weird FS | `tail.Options.NoInodeCheck bool` | L2 |
 | ext | Cursor format human-inspectable | JSON | L2 |
 
 Additional v2 wishlist items map cleanly:
@@ -584,7 +584,7 @@ This makes "fsnotify just works" the default while preserving an escape hatch fo
 
 - `stat_unix.go` (build tag `unix`): pulls inode from `syscall.Stat_t.Ino`. No `golang.org/x/sys` dep needed; stdlib `syscall` suffices on the platforms we target. (v1 uses both `unix.Stat_t` and `syscall.Stat_t` in `file_state.go:60-67` but they're equivalent on every supported platform; drop the x/sys dep.)
 - `stat_windows.go` (build tag `windows`): calls `GetFileInformationByHandle` via `syscall.GetFileInformationByHandle`. Combine `nFileIndexHigh<<32 | nFileIndexLow` into a `uint64`. Note in doc comment: stable on NTFS, *not* stable on ReFS or some network filesystems.
-- `tail.WithoutInodeCheck()` cursor option — disables the equality check entirely. Use case: Windows ReFS, FUSE mounts, anything where inode reuse is known to happen. Trades robustness against rotation for cross-platform predictability.
+- `tail.Options.NoInodeCheck bool` — disables the equality check entirely. The flag lives on `Options` (not on `FileCursorOption`) because the inode comparison happens in the watcher / `findFileByInode`, not inside the cursor. Use case: Windows ReFS, FUSE mounts, anything where inode reuse is known to happen. Trades robustness against rotation for cross-platform predictability.
 
 **Hard parts called out:**
 
@@ -1406,7 +1406,6 @@ that explicitly rather than fabricating a review back-reference.
 
 | Plan reference | What the plan committed | What ships today | Driver |
 |---|---|---|---|
-| §3 ext, §5.2 | `tail.WithoutInodeCheck()` cursor option | Renamed to a flag on `tail.Options.NoInodeCheck bool`. Functionally close, but the option is on `Options`, not on `FileCursorOption`, because inode comparison happens in the watcher / `findFileByInode`, not inside the cursor. | Pre-review (design-time choice). |
 | Decision #4 | “Drop `golang.org/x/sys` dependency.” | Direct dep is dropped (`go.mod` shows it only `// indirect`), but it is still pulled in transitively by `fsnotify`. Spirit-of-the-plan compliance, not letter. | [PERF_REVIEW §H4](./reviews/PERF_REVIEW.md) tightened the stat path to a stdlib-only `statSizeInode` helper, eliminating the last in-tree x/sys touchpoints. The transitive pull from fsnotify remains. |
 
 ### 11.2 Architectural pivots (the code took a different path than the plan’s words)
@@ -1456,21 +1455,7 @@ internalised the plan’s mental model first must remap.
    `Forwarder.Run` honour the age timer without a feeder goroutine,
    buffered channel, or `recItem` wrapper.
 
-3. **Source exhaustion is detected by sentinel, not by `Done()`.**
-   *Plan (§4 L3):* “Run blocks until ctx canceled, Sink returns
-   ErrPermanent, or Source signals exhaustion via `Done()`. Returns nil on
-   normal exhaustion.”
-   *Actual:* `Forwarder.Run` matches `errors.Is(err, tail.ErrSourceExhausted)`
-   on the return value of `Source.Next` (`forward/forward.go:168`). The
-   `Done()` channel is required by the interface but **never read** by
-   `Run`. `Tailer` itself only ever closes `Done` in `StopAtEOF` mode; the
-   forwarder learns of exhaustion strictly from the Next-error channel.
-   *Driver:* [PERF_REVIEW §H1](./reviews/PERF_REVIEW.md) again — once the feeder goroutine went, the
-   only natural place to detect exhaustion was the per-call error from
-   `Source.Next`. [CODE_REVIEW §8 (forward feeder leak)](./reviews/CODE_REVIEW.md) was the
-   correctness driver for the same pivot in the original review pass.
-
-4. **`tail.New` takes a `ctx` parameter.**
+3. **`tail.New` takes a `ctx` parameter.**
    *Plan (§4 L2):* `func New(opts Options) (*Tailer, error)`
    *Actual:* `func New(ctx context.Context, opts Options) (*Tailer, error)`
    The `ctx` governs only startup I/O (`Source.Enumerate`, `Cursor.Load`);
@@ -1479,7 +1464,7 @@ internalised the plan’s mental model first must remap.
    pointed out that `New` did blocking I/O against `context.Background()`
    and recommended a ctx parameter or `OpenContext` field.
 
-5. **Atomic-write step ordering.**
+4. **Atomic-write step ordering.**
    *Plan (§5.3):* Write tmp → fsync tmp → rename → optional dir-fsync →
    close tmp. (Close after rename.)
    *Actual:* Write → fsync → **close** → rename → optional dir-fsync. Closing
@@ -1584,11 +1569,11 @@ deltas are:
   (excludes batch fill and failed retries).
 - **`forward.RecordSource` is pull-style** (§11.2 #2): third-party
   sources must implement `Next`, not `Records`.
-- **Forwarder exhaustion now honours both paths**: `tail.ErrSourceExhausted`
-  from `Next` *and* `RecordSource.Done()` closing (§11.2 #3). A 3rd-party
-  source that signals exhaustion via `Done()` will terminate `Run` cleanly;
-  in-flight retries continue against the parent ctx so the last batch is
-  still delivered.
+- **Forwarder exhaustion honours both paths**: `tail.ErrSourceExhausted`
+  from `Next` *and* `RecordSource.Done()` closing. A 3rd-party source that
+  signals exhaustion via `Done()` will terminate `Run` cleanly; in-flight
+  retries continue against the parent ctx so the last batch is still
+  delivered.
 - **Compressed-backup behaviour is partial** (§11.3 #2, §11.3 #9):
   detection-and-skip ships, decompression does not. A checkpoint pointing
   at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy.
