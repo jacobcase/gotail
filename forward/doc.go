@@ -25,4 +25,13 @@
 // # slog keys
 //
 // Library log lines use the following attribute keys: err, offset, attempt, latency_ms.
+//
+// # Layering
+//
+// forward depends on tail (the canonical [RecordSource] is [*tail.Tailer]).
+// The [Position] and [Record] types are re-exported as aliases so that
+// third-party implementations of [RecordSource], [Sink], and similar
+// interfaces do not need to import the tail package directly. The aliases
+// are package-level types: forward.Record is the same type as tail.Record,
+// so values flow freely between the two packages.
 package forward

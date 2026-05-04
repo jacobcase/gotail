@@ -13,14 +13,20 @@ import (
 	"github.com/jacobcase/gotail/v2/tail"
 )
 
-// Position is an alias for [tail.Position] so callers do not need to import
-// the tail package just to handle positions.
+// Position is an alias for [tail.Position] so external implementations of
+// [Sink], [RecordSource], and [Cursor] do not need to import the tail
+// package just to handle positions.
 type Position = tail.Position
+
+// Record is an alias for [tail.Record] for the same reason as [Position]:
+// it lets third-party RecordSource/Sink implementations refer to the record
+// shape without importing the tail package directly.
+type Record = tail.Record
 
 // RecordSource is the read side of a [tail.Tailer]. [*tail.Tailer] satisfies
 // this interface, enabling Forwarder to be tested with lightweight fakes.
 type RecordSource interface {
-	Records(ctx context.Context) iter.Seq2[tail.Record, error]
+	Records(ctx context.Context) iter.Seq2[Record, error]
 	Commit(ctx context.Context, pos Position) error
 	Done() <-chan struct{}
 }
