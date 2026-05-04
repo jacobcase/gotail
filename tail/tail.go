@@ -62,6 +62,12 @@ type Options struct {
 	// existing content and tails only new data. Ignored when a Cursor
 	// provides a resume point.
 	Whence int
+	// SkipExisting is a discoverable convenience for [io.SeekEnd]: when
+	// true (and Whence is zero) the Tailer starts at the end of the first
+	// file and only yields lines written after construction. Has no effect
+	// when a Cursor provides a resume point. Setting both SkipExisting and
+	// a non-zero Whence returns an error from [New].
+	SkipExisting bool
 	// StopAtEOF causes Next to return [ErrSourceExhausted] once the active
 	// file reaches EOF instead of blocking for new data.
 	StopAtEOF bool
@@ -128,6 +134,12 @@ type Tailer struct {
 func New(ctx context.Context, opts Options) (*Tailer, error) {
 	if opts.Source == nil {
 		return nil, errors.New("tail: Options.Source must not be nil")
+	}
+	if opts.SkipExisting && opts.Whence != 0 {
+		return nil, errors.New("tail: SkipExisting and Whence are mutually exclusive")
+	}
+	if opts.SkipExisting {
+		opts.Whence = io.SeekEnd
 	}
 	if opts.Interval <= 0 {
 		opts.Interval = time.Second

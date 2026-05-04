@@ -1043,3 +1043,129 @@ func TestProperty_NoByteYieldedTwice(t *testing.T) {
 		}
 	}
 }
+
+// ── Phase A: SkipExisting ─────────────────────────────────────────────────────
+
+func TestTailer_SkipExisting_NoCheckpoint(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "skip.log")
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		f.WriteString("before\n")
+	}
+	f.Close()
+
+	opts := tail.Options{
+		Source:       tail.SingleFile(path),
+		Interval:     10 * time.Millisecond,
+		SkipExisting: true,
+	}
+	tr := mustNew(t, opts)
+
+	// Start consumer goroutines first — they will block at the file's current
+	// end waiting for new data. The watcher's openFirst seeks to EOF before
+	// the first poll; appending after ensures we only yield post-creation lines.
+	type lineResult struct {
+		line string
+		err  error
+	}
+	results := make(chan lineResult, 3)
+	go func() {
+		for i := 0; i < 3; i++ {
+			rec, err := tr.Next(ctx)
+			results <- lineResult{line: string(rec.Line), err: err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Give the goroutine time to enter its blocking Wait in the watcher so
+	// openFirst has already consumed the existing bytes.
+	time.Sleep(50 * time.Millisecond)
+
+	// Append 3 more lines after the tailer is positioned at EOF.
+	af, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		af.WriteString("after\n")
+	}
+	af.Close()
+
+	for i := 0; i < 3; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("Next #%d: %v", i, r.err)
+		}
+		if r.line != "after" {
+			t.Fatalf("want 'after', got %q", r.line)
+		}
+	}
+}
+
+func TestTailer_SkipExisting_WithCheckpoint(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "skip_cp.log")
+	if err := os.WriteFile(path, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a cursor pointing at offset 0 (start of file).
+	inode, err := watchStatInode(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := tail.NewMemoryCursor()
+	cur.Save(ctx, tail.Checkpoint{Pos: tail.Position{File: path, Inode: inode, Offset: 0}})
+
+	opts := tail.Options{
+		Source:       tail.SingleFile(path),
+		Cursor:       cur,
+		Interval:     10 * time.Millisecond,
+		StopAtEOF:    true,
+		SkipExisting: true, // should be ignored because checkpoint exists
+	}
+	tr := mustNew(t, opts)
+
+	var lines []string
+	for rec, err := range tr.Records(ctx) {
+		if err != nil {
+			break
+		}
+		lines = append(lines, string(rec.Line))
+	}
+	// Should yield both lines (checkpoint overrides SkipExisting).
+	if len(lines) != 2 {
+		t.Fatalf("want 2 lines (checkpoint overrides SkipExisting), got %d: %v", len(lines), lines)
+	}
+}
+
+func TestTailer_SkipExisting_ConflictsWithWhence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "conflict.log")
+	if err := os.WriteFile(path, []byte("data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := tail.New(context.Background(), tail.Options{
+		Source:       tail.SingleFile(path),
+		Interval:     10 * time.Millisecond,
+		SkipExisting: true,
+		Whence:       1, // io.SeekCurrent
+	})
+	if err == nil {
+		t.Fatal("want error for SkipExisting+Whence, got nil")
+	}
+}

@@ -66,6 +66,11 @@ type Options[T any] struct {
 	// Retry configuration.
 	InitialBackoff time.Duration // first retry sleep; default 100ms
 	MaxBackoff     time.Duration // backoff ceiling; default 30s
+	// BackoffJitter controls the fraction of the ceiling used for jitter.
+	// Must be in [0, 1]. 0 = deterministic (always ceiling). 1 = full jitter
+	// (current behaviour, rand in [0, ceiling)). Default is 0.2 (±20% around
+	// 0.8×ceiling). Negative or >1 is rejected by [New].
+	BackoffJitter float64
 
 	Logger *slog.Logger
 
@@ -100,6 +105,12 @@ func New[T any](opts Options[T]) (*Forwarder[T], error) {
 	}
 	if opts.MaxBatchRecords == 0 && opts.MaxBatchBytes == 0 && opts.MaxBatchAge == 0 {
 		return nil, errors.New("forward: at least one of MaxBatchRecords, MaxBatchBytes, MaxBatchAge must be set")
+	}
+	if opts.BackoffJitter < 0 || opts.BackoffJitter > 1 {
+		return nil, fmt.Errorf("forward: BackoffJitter must be in [0, 1], got %g", opts.BackoffJitter)
+	}
+	if opts.BackoffJitter == 0 {
+		opts.BackoffJitter = 0.2
 	}
 	if opts.InitialBackoff <= 0 {
 		opts.InitialBackoff = 100 * time.Millisecond
@@ -243,8 +254,11 @@ func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, pos Positio
 	}
 }
 
-// jitteredBackoff returns a full-jitter duration for the given attempt:
-// rand(0, min(MaxBackoff, InitialBackoff * 2^attempt)).
+// jitteredBackoff returns a jitter-scaled duration for the given attempt.
+// The jitter factor is BackoffJitter (0..1):
+//   - 0 → deterministic, always returns ceiling.
+//   - 1 → full jitter, rand in [0, ceiling).
+//   - 0.2 (default) → rand in [0.8·ceiling, ceiling).
 func (f *Forwarder[T]) jitteredBackoff(attempt int) time.Duration {
 	shift := attempt
 	if shift > 62 {
@@ -257,7 +271,13 @@ func (f *Forwarder[T]) jitteredBackoff(attempt int) time.Duration {
 	if ceiling <= 0 {
 		return 0
 	}
-	return time.Duration(rand.Int64N(int64(ceiling)))
+	jitter := f.opts.BackoffJitter
+	base := time.Duration(float64(ceiling) * (1 - jitter))
+	jitterRange := ceiling - base
+	if jitterRange <= 0 {
+		return base
+	}
+	return base + time.Duration(rand.Int64N(int64(jitterRange)))
 }
 
 // WithSinkTimeout returns a middleware that wraps a [Sink] so each Send call
