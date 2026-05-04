@@ -1,5 +1,8 @@
 # gotail Performance & Simplicity Review
 
+- **Conducted:** 2026-05-04
+- **Closed:** 2026-05-04
+
 Scope: `watch`, `tail`, `forward`, `internal/atomicwrite`, `cmd/gotail`,
 `tailtest`, `forwardtest`. Focused on performance anti-patterns, channel
 and goroutine value, dead/redundant code, and OS file-handling correctness.
