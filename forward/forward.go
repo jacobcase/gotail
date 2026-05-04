@@ -287,18 +287,18 @@ func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, pos Positio
 // jitteredBackoff returns a full-jitter duration for the given attempt:
 // rand(0, min(MaxBackoff, InitialBackoff * 2^attempt)).
 func (f *Forwarder[T]) jitteredBackoff(attempt int) time.Duration {
-	cap := f.opts.InitialBackoff
+	ceiling := f.opts.InitialBackoff
 	for i := 0; i < attempt; i++ {
-		cap *= 2
-		if cap <= 0 || cap > f.opts.MaxBackoff {
-			cap = f.opts.MaxBackoff
+		ceiling *= 2
+		if ceiling <= 0 || ceiling > f.opts.MaxBackoff {
+			ceiling = f.opts.MaxBackoff
 			break
 		}
 	}
-	if cap <= 0 {
+	if ceiling <= 0 {
 		return 0
 	}
-	return time.Duration(rand.Int64N(int64(cap)))
+	return time.Duration(rand.Int64N(int64(ceiling)))
 }
 
 // WithSinkTimeout returns a middleware that wraps a [Sink] so each Send call
