@@ -87,6 +87,70 @@ func TestFsnotify_WriteEvent(t *testing.T) {
 	}
 }
 
+// TestFsnotify_ReadAfterWatcher_RaceDrain mirrors the polling backend's
+// race-drain test (TestReadAfterWatcher_RaceDrain in poll_test.go) on the
+// fsnotify path. The two backends share the same rotation-drain state
+// machine; this test pins that the fsnotify branch's re-stat after rotation
+// surfaces bytes appended to the old fd before switching to the new file.
+func TestFsnotify_ReadAfterWatcher_RaceDrain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "race.log")
+	writeFile(t, path, "initial\n") // 8 bytes
+
+	w, err := watch.NewFsnotify(watch.Config{Path: path})
+	if err != nil {
+		t.Fatalf("NewFsnotify: %v", err)
+	}
+	defer w.Close()
+
+	// Wait 1: open event (ReOpened).
+	ev, err := w.Wait(ctx)
+	if err != nil {
+		t.Fatalf("Wait #1: %v", err)
+	}
+	if !ev.ReOpened {
+		t.Fatalf("expected ReOpened, got %+v", ev)
+	}
+
+	// Wait 2: initial 8 bytes surfaced as a new-data event.
+	ev, err = w.Wait(ctx)
+	if err != nil {
+		t.Fatalf("Wait #2: %v", err)
+	}
+	if ev.ReOpened || ev.Truncated {
+		t.Fatalf("expected non-ReOpened new-data event, got %+v", ev)
+	}
+
+	// Race: append 9 bytes to old file, then rotate it away, then create new
+	// file at the path. Old fd remains open and visible at the original inode.
+	appendFile(t, path, "appended\n")
+	rotate(t, path)
+	writeFile(t, path, "new\n")
+
+	// Wait 3: race-drain. Old fd's size is now 17 > pos=8. The fsnotify Wait
+	// loop must emit a new-data event for the 9 appended bytes before
+	// switching to the rotated-in file.
+	ev, err = w.Wait(ctx)
+	if err != nil {
+		t.Fatalf("Wait #3: %v", err)
+	}
+	if ev.ReOpened {
+		t.Fatalf("race drain: expected non-ReOpened for appended bytes, got %+v", ev)
+	}
+
+	// Wait 4: rotation surfaces.
+	ev, err = w.Wait(ctx)
+	if err != nil {
+		t.Fatalf("Wait #4: %v", err)
+	}
+	if !ev.ReOpened {
+		t.Fatalf("expected ReOpened after race drain, got %+v", ev)
+	}
+}
+
 func TestFsnotify_FallbackToPolling(t *testing.T) {
 	// When ForcePolling is true, tail.New uses NewPolling directly.
 	// This test verifies watch.New falls back correctly when we request
