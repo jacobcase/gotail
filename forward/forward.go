@@ -125,14 +125,33 @@ func New[T any](opts Options[T]) (*Forwarder[T], error) {
 }
 
 // Run reads from Source until it is exhausted or ctx is cancelled.
-// It returns nil when Source signals exhaustion ([tail.ErrSourceExhausted]),
-// ctx.Err() on cancellation, or a wrapped [ErrPermanent] on a non-retryable
-// Sink failure.
+// It returns nil when Source signals exhaustion ([tail.ErrSourceExhausted]
+// from Next, or [RecordSource.Done] closing), ctx.Err() on cancellation,
+// or a wrapped [ErrPermanent] on a non-retryable Sink failure.
 //
 // MaxBatchAge is enforced by giving each Source.Next call a derived
 // deadline of (batchStart + MaxBatchAge) when a non-empty batch is in
 // flight; on context.DeadlineExceeded the batch is flushed.
 func (f *Forwarder[T]) Run(ctx context.Context) error {
+	// Inner ctx that cancels on parent ctx OR Source.Done() closure. This
+	// catches the case where a 3rd-party RecordSource signals exhaustion via
+	// Done() but its Next keeps returning records (or blocks). Defers run
+	// LIFO; the wait must run AFTER runCancel so the watcher always exits.
+	runCtx, runCancel := context.WithCancel(ctx)
+	doneWatcherDone := make(chan struct{})
+	go func() {
+		defer close(doneWatcherDone)
+		select {
+		case <-runCtx.Done():
+		case <-f.opts.Source.Done():
+			runCancel()
+		}
+	}()
+	defer func() {
+		runCancel()
+		<-doneWatcherDone
+	}()
+
 	var (
 		batch        []T
 		batchBytes   int
@@ -144,6 +163,9 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 		if len(batch) == 0 {
 			return nil
 		}
+		// sendWithRetry uses the parent ctx, not runCtx: Source.Done()
+		// signals "no more new records" — the in-flight batch should still
+		// be delivered. Only parent-ctx cancellation aborts retries.
 		err := f.sendWithRetry(ctx, batch, batchLastPos)
 		batch = batch[:0]
 		batchBytes = 0
@@ -153,11 +175,11 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 
 	for {
 		// Per-Next deadline: only when a batch is in flight and an age cap
-		// is configured. The deadline is the parent ctx if neither.
-		nextCtx := ctx
+		// is configured. The deadline is runCtx if neither.
+		nextCtx := runCtx
 		var cancel context.CancelFunc
 		if len(batch) > 0 && f.opts.MaxBatchAge > 0 {
-			nextCtx, cancel = context.WithDeadline(ctx, batchStart.Add(f.opts.MaxBatchAge))
+			nextCtx, cancel = context.WithDeadline(runCtx, batchStart.Add(f.opts.MaxBatchAge))
 		}
 		rec, err := f.opts.Source.Next(nextCtx)
 		if cancel != nil {
@@ -165,10 +187,17 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 		}
 
 		if err != nil {
-			// Distinguish per-Next deadline (age timer fired) from real
-			// parent-ctx cancellation by checking ctx.Err() directly.
+			// Parent ctx canceled: return its err.
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			// runCtx canceled but parent fine → Source.Done() fired. Treat
+			// as normal exhaustion.
+			if runCtx.Err() != nil {
+				if ferr := flush(); ferr != nil {
+					return ferr
+				}
+				return nil
 			}
 			if errors.Is(err, context.DeadlineExceeded) {
 				if ferr := flush(); ferr != nil {

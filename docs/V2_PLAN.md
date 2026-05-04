@@ -1586,14 +1586,6 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    which recommended at minimum a Debug log and ideally surfacing
    `ErrInodeMismatch` so callers can choose. The “surface as sentinel”
    half is still pending.
-5. **`Forwarder` ignores its `RecordSource.Done()` channel.** The interface
-   requires it; `Forwarder.Run` does not select on it. Cleanup signalling
-   is exclusively via `ErrSourceExhausted`. Plan §4 L3 Run docstring
-   implies `Done()` is checked.
-   *Driver:* [PERF_REVIEW §H1](./reviews/PERF_REVIEW.md) (feeder removal made the channel
-   unreachable from the run loop) and [CODE_REVIEW §8 (forward feeder
-   leak)](./reviews/CODE_REVIEW.md) (the original correctness motivation for the rewrite).
-
 ### 11.5 Plan-vs-shipped impact summary
 
 For an auditor or implementer reasoning from this plan, the highest-impact
@@ -1612,9 +1604,11 @@ deltas are:
   pipelines wired to the plan’s signature will not compile.
 - **`forward.RecordSource` is pull-style** (§11.2 #2): third-party
   sources must implement `Next`, not `Records`.
-- **Forwarder exhaustion is sentinel-driven, not channel-driven** (§11.2
-  #3): a `RecordSource` whose `Done()` closes but whose `Next` keeps
-  returning records will *not* terminate `Run`.
+- **Forwarder exhaustion now honours both paths**: `tail.ErrSourceExhausted`
+  from `Next` *and* `RecordSource.Done()` closing (§11.2 #3). A 3rd-party
+  source that signals exhaustion via `Done()` will terminate `Run` cleanly;
+  in-flight retries continue against the parent ctx so the last batch is
+  still delivered.
 - **Compressed-backup behaviour is partial** (§11.3 #2, §11.3 #9):
   detection-and-skip ships, decompression does not. A checkpoint pointing
   at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy.

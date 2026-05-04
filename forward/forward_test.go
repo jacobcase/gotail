@@ -916,3 +916,74 @@ func TestForwarder_BackoffJitter_OutOfRange(t *testing.T) {
 		}
 	}
 }
+
+// doneClosableSource is a RecordSource whose Done() channel can be closed
+// externally. Next keeps returning records indefinitely until ctx cancels —
+// exactly the case the §11.4 #7 fix targets.
+type doneClosableSource struct {
+	done chan struct{}
+}
+
+func (s *doneClosableSource) Next(ctx context.Context) (tail.Record, error) {
+	select {
+	case <-ctx.Done():
+		return tail.Record{}, ctx.Err()
+	default:
+	}
+	return tail.Record{Line: []byte("x"), Pos: tail.Position{File: "x", Inode: 1, Offset: 1}}, nil
+}
+func (s *doneClosableSource) Commit(_ context.Context, _ forward.Position) error { return nil }
+func (s *doneClosableSource) Done() <-chan struct{}                              { return s.done }
+
+// TestForwarder_HonoursSourceDone pins §11.4 #7 / §4 L3 Run docstring:
+// when Source.Done() closes, Run must exit cleanly even if Next keeps
+// returning records.
+func TestForwarder_HonoursSourceDone(t *testing.T) {
+	src := &doneClosableSource{done: make(chan struct{})}
+	sink := forward.SinkFunc[[]byte](func(_ context.Context, _ [][]byte) error { return nil })
+	fwd := mustNewForwarder(t, forward.Options[[]byte]{
+		Source:          src,
+		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:            sink,
+		MaxBatchRecords: 8,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Close Done() shortly after Run starts, simulating the Tailer
+	// signalling exhaustion via channel.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(src.done)
+	}()
+
+	if err := fwd.Run(ctx); err != nil {
+		t.Fatalf("Run: want nil after Source.Done() close, got %v", err)
+	}
+}
+
+// TestForwarder_CtxCancelStillReturnsCtxErr pins that parent-ctx
+// cancellation is distinguished from Source.Done() — the former returns
+// ctx.Err(), the latter returns nil.
+func TestForwarder_CtxCancelStillReturnsCtxErr(t *testing.T) {
+	src := &doneClosableSource{done: make(chan struct{})} // never closes
+	sink := forward.SinkFunc[[]byte](func(_ context.Context, _ [][]byte) error { return nil })
+	fwd := mustNewForwarder(t, forward.Options[[]byte]{
+		Source:          src,
+		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:            sink,
+		MaxBatchRecords: 8,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	err := fwd.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run: want context.Canceled, got %v", err)
+	}
+}
