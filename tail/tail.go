@@ -219,16 +219,15 @@ func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) 
 }
 
 // findFileByInode returns the index in files whose inode matches want, or -1.
-// When noInodeCheck is true, treat Inode=0 comparisons as "always match"
-// (allowing offset-only resume on Windows or inode-less filesystems).
+// When noInodeCheck is true, the first existing file is treated as a match
+// (used for filesystems without stable inodes — ReFS, some FUSE mounts).
 func findFileByInode(files []string, want uint64, noInodeCheck bool) int {
 	for i, path := range files {
 		cur, err := watch.StatInode(path)
 		if err != nil {
 			continue // file may not exist yet
 		}
-		if noInodeCheck || (cur == 0 && want == 0) {
-			// Can't use inodes → treat first file as matching.
+		if noInodeCheck {
 			return i
 		}
 		if cur == want {
@@ -236,18 +235,6 @@ func findFileByInode(files []string, want uint64, noInodeCheck bool) int {
 		}
 	}
 	return -1
-}
-
-// checkInode stats path and reports whether its inode differs from want.
-func checkInode(path string, want uint64) (mismatch bool, err error) {
-	current, err := watch.StatInode(path)
-	if err != nil {
-		return false, err
-	}
-	if want == 0 && current == 0 {
-		return false, nil
-	}
-	return current != want, nil
 }
 
 // advance closes the current LineReader and opens the next file in the series.

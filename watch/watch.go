@@ -92,14 +92,18 @@ func New(c Config) (Watcher, error) {
 	return nil, err
 }
 
-// StatInode returns the inode number of the file at path using os.Stat.
-// Returns 0 on platforms or filesystems where inodes are not available.
+// StatInode returns a stable file identity for the file at path.
+// On Unix it is the inode from stat(2); on Windows it is the file index from
+// GetFileInformationByHandle, which requires opening the file. Returns 0 on
+// filesystems where a stable identity is not available (e.g., ReFS, some
+// network filesystems).
 func StatInode(path string) (uint64, error) {
-	fi, err := os.Stat(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
-	return fileInode(fi), nil
+	defer f.Close()
+	return fileID(f), nil
 }
 
 var (

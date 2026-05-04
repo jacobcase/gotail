@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -161,7 +162,7 @@ func (w *fsnotifyWatcher) fsnOpenFirst() (*Event, error) {
 		return nil, fmt.Errorf("watch: stat %s: %w", w.c.Path, err)
 	}
 
-	inode := fileInode(fi)
+	inode := fileID(f)
 	var seekPos int64
 
 	if w.c.Resume != nil && !w.c.Resume.IsZero() {
@@ -199,15 +200,20 @@ func (w *fsnotifyWatcher) fsnOpenFirst() (*Event, error) {
 }
 
 func (w *fsnotifyWatcher) fsnIsRotated() (bool, uint64, error) {
-	fi, err := os.Stat(w.c.Path)
-	if os.IsNotExist(err) {
+	f, err := os.Open(w.c.Path)
+	if errors.Is(err, fs.ErrNotExist) {
 		return false, 0, nil
 	}
 	if err != nil {
-		return false, 0, fmt.Errorf("watch: stat path for rotation check: %w", err)
+		return false, 0, fmt.Errorf("watch: open path for rotation check: %w", err)
 	}
-	newInode := fileInode(fi)
+	defer f.Close()
+	newInode := fileID(f)
 	if w.c.NoInodeCheck {
+		fi, err := f.Stat()
+		if err != nil {
+			return false, 0, fmt.Errorf("watch: stat path for rotation check: %w", err)
+		}
 		return fi.Size() < w.pos, newInode, nil
 	}
 	return newInode != w.inode, newInode, nil
@@ -230,15 +236,10 @@ func (w *fsnotifyWatcher) fsnRotate(newInode uint64) (Event, error) {
 	if err != nil {
 		return Event{}, fmt.Errorf("watch: open new file after rotation: %w", err)
 	}
-	newFi, err := newFile.Stat()
-	if err != nil {
-		newFile.Close()
-		return Event{}, fmt.Errorf("watch: stat new file: %w", err)
-	}
 
 	w.f = newFile
 	w.pos = 0
-	w.inode = fileInode(newFi)
+	w.inode = fileID(newFile)
 	w.oldFile = oldFile
 
 	return Event{

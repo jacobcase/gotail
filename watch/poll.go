@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"time"
@@ -169,7 +170,7 @@ func (p *pollWatcher) openFirst() (*Event, error) {
 		return nil, fmt.Errorf("watch: stat %s: %w", p.c.Path, err)
 	}
 
-	inode := fileInode(fi)
+	inode := fileID(f)
 	var seekPos int64
 
 	if p.c.Resume != nil && !p.c.Resume.IsZero() {
@@ -208,16 +209,24 @@ func (p *pollWatcher) openFirst() (*Event, error) {
 }
 
 // isRotated checks whether the named path now holds a different file.
+// On Windows, deriving a stable file identity requires an open handle, so we
+// open the path briefly here. On Unix this is one extra open+close per check
+// (negligible against the polling interval) but keeps the code uniform.
 func (p *pollWatcher) isRotated() (bool, uint64, error) {
-	fi, err := os.Stat(p.c.Path)
-	if os.IsNotExist(err) {
+	f, err := os.Open(p.c.Path)
+	if errors.Is(err, fs.ErrNotExist) {
 		return false, 0, nil
 	}
 	if err != nil {
-		return false, 0, fmt.Errorf("watch: stat path for rotation check: %w", err)
+		return false, 0, fmt.Errorf("watch: open path for rotation check: %w", err)
 	}
-	newInode := fileInode(fi)
+	defer f.Close()
+	newInode := fileID(f)
 	if p.c.NoInodeCheck {
+		fi, err := f.Stat()
+		if err != nil {
+			return false, 0, fmt.Errorf("watch: stat path for rotation check: %w", err)
+		}
 		return fi.Size() < p.pos, newInode, nil
 	}
 	return newInode != p.inode, newInode, nil
@@ -244,15 +253,10 @@ func (p *pollWatcher) rotate(newInode uint64) (Event, error) {
 	if err != nil {
 		return Event{}, fmt.Errorf("watch: open new file after rotation: %w", err)
 	}
-	newFi, err := newFile.Stat()
-	if err != nil {
-		newFile.Close()
-		return Event{}, fmt.Errorf("watch: stat new file: %w", err)
-	}
 
 	p.f = newFile
 	p.pos = 0 // rotation invariant: new file always starts at offset 0; Resume is one-shot (openFirst only)
-	p.inode = fileInode(newFi)
+	p.inode = fileID(newFile)
 	p.oldFile = oldFile // released at start of next Wait
 
 	return Event{
