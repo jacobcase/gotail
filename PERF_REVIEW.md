@@ -24,9 +24,9 @@ Tests pass cleanly (`go test -count=1 -short ./watch/... ./tail/... ./forward/..
 | M6 — `time.After` → `time.NewTimer` | **DONE** | `45e13fb` |
 | M7 — `RecordingSink.All` preallocation | **DONE** | `877e5d6` |
 | L1 — `openFirst` switch → if/else | **DONE** (incidental in H3 rewrite) | `45e13fb` |
-| L2 — `Logrotate.Enumerate` redundant `HasPrefix` | **DONE** | _pending_ |
-| L3 — `MemorySource` naming collision | **DONE** | _pending_ |
-| L4 — `maxMetaBytes` check before marshal | **DONE** (renamed to `maxRawMetaBytes`) | _pending_ |
+| L2 — `Logrotate.Enumerate` redundant `HasPrefix` | **DONE** | `655b3e2` |
+| L3 — `MemorySource` naming collision | **DONE** | `655b3e2` |
+| L4 — `maxMetaBytes` check before marshal | **DONE** (renamed to `maxRawMetaBytes`) | `655b3e2` |
 | L5 — `cmd/gotail` two writes per record | **WONTFIX** — plumbing `KeepNewline` through `tail.Options` costs more than the gain (writes already coalesce through `bufio.Writer`) | — |
 
 ---
@@ -361,7 +361,7 @@ All in-scope items addressed across three implementation commits plus this doc:
   Net **−336 lines**; tests green under `-race` for both default and
   `gotail_nofsnotify` build tags.
 - `877e5d6` — M2, M4, M7. Tiny follow-up batch.
-- _pending_ — L2, L3, L4. Trivial cleanups + `tail.MemorySource` →
+- `655b3e2` — L2, L3, L4. Trivial cleanups + `tail.MemorySource` →
   `tail.StaticSource` rename to disambiguate from `tailtest.MemorySource`.
 
 L5 closed as **wontfix** (plumbing cost > gain).
