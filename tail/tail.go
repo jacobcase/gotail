@@ -96,10 +96,17 @@ type Tailer struct {
 	cur       Position
 	lastMeta  json.RawMessage // preserved across plain Commit calls
 
-	done      chan struct{}
-	doneOnce  sync.Once
-	closed    chan struct{}
-	closeOnce sync.Once
+	done     chan struct{}
+	doneOnce sync.Once
+
+	// closeCtx is cancelled by Close. It is wired into the per-call ctx of
+	// Next via context.AfterFunc so that Close interrupts any blocking
+	// LineReader.Next, allowing Close to await in-flight Next calls before
+	// touching lr (which is not safe for concurrent use).
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
+	activeNext  sync.WaitGroup
+	closeOnce   sync.Once
 }
 
 // New constructs a Tailer. opts.Source must be non-nil.
@@ -163,14 +170,16 @@ func New(opts Options) (*Tailer, error) {
 		}
 	}
 
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	t := &Tailer{
-		opts:     opts,
-		files:    files,
-		fileIdx:  startIdx,
-		atActive: startIdx == len(files)-1,
-		lastMeta: lastMeta,
-		done:     make(chan struct{}),
-		closed:   make(chan struct{}),
+		opts:        opts,
+		files:       files,
+		fileIdx:     startIdx,
+		atActive:    startIdx == len(files)-1,
+		lastMeta:    lastMeta,
+		done:        make(chan struct{}),
+		closeCtx:    closeCtx,
+		closeCancel: closeCancel,
 	}
 
 	if err := t.openFile(files[startIdx], resumePos, lg); err != nil {
@@ -287,20 +296,34 @@ func (t *Tailer) Records(ctx context.Context) iter.Seq2[Record, error] {
 
 // Next returns the next line. It blocks until a line is available, the context
 // is cancelled, or (in StopAtEOF mode) the file series is exhausted.
+//
+// When [Tailer.Close] is called concurrently, the internal closeCtx is wired
+// into Next's ctx via context.AfterFunc so a blocking LineReader.Next returns
+// promptly. Close waits for all in-flight Next calls before tearing down lr.
 func (t *Tailer) Next(ctx context.Context) (Record, error) {
-	for {
-		select {
-		case <-t.closed:
-			return Record{}, ErrSourceExhausted
-		default:
-		}
+	t.activeNext.Add(1)
+	defer t.activeNext.Done()
 
+	if err := t.closeCtx.Err(); err != nil {
+		return Record{}, ErrSourceExhausted
+	}
+
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(t.closeCtx, cancel)
+	defer stop()
+
+	for {
 		t.mu.Lock()
 		lr := t.lr
 		t.mu.Unlock()
 
-		line, pos, err := lr.Next(ctx)
+		line, pos, err := lr.Next(callCtx)
 		if err != nil {
+			if t.closeCtx.Err() != nil {
+				// Close is in progress; surface as exhaustion rather than ctx.Err.
+				return Record{}, ErrSourceExhausted
+			}
 			if errors.Is(err, io.EOF) {
 				if t.atActive {
 					// Active file exhausted (StopAtEOF was set in watcher).
@@ -308,7 +331,7 @@ func (t *Tailer) Next(ctx context.Context) (Record, error) {
 					return Record{}, ErrSourceExhausted
 				}
 				// Backup file exhausted — advance to the next file.
-				if aerr := t.advance(ctx); aerr != nil {
+				if aerr := t.advance(callCtx); aerr != nil {
 					return Record{}, aerr
 				}
 				continue
@@ -387,12 +410,19 @@ func (t *Tailer) Done() <-chan struct{} {
 	return t.done
 }
 
-// Close releases all resources held by the Tailer. It is idempotent. Any
-// pending uncommitted line is discarded; commit before closing if needed.
+// Close releases all resources held by the Tailer. It is idempotent and safe
+// to call from any goroutine. Any pending uncommitted line is discarded;
+// commit before closing if needed.
+//
+// Close cancels the internal closeCtx and blocks until all in-flight Next
+// calls have returned, so that LineReader.Close — which is not safe for
+// concurrent use with Next — runs without a race.
 func (t *Tailer) Close() error {
 	var rerr error
 	t.closeOnce.Do(func() {
-		close(t.closed)
+		t.closeCancel()
+		t.activeNext.Wait()
+
 		t.mu.Lock()
 		lr := t.lr
 		t.mu.Unlock()

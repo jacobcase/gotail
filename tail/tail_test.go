@@ -291,6 +291,70 @@ func TestTailer_Close_Idempotent(t *testing.T) {
 	}
 }
 
+// TestTailer_CloseInterruptsBlockedNext pins the new contract: Close from a
+// different goroutine cancels the internal closeCtx, which (via
+// context.AfterFunc) interrupts a Tailer.Next blocked inside LineReader.Next.
+// Close then awaits the in-flight Next via WaitGroup before tearing down
+// the LineReader, removing the previous data race between lr.Close and
+// lr.Next on l.f / l.src.
+func TestTailer_CloseInterruptsBlockedNext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "live.log")
+	if err := os.WriteFile(path, []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := mustNew(t, tail.Options{
+		Source:   tail.SingleFile(path),
+		Interval: 10 * time.Millisecond,
+		// Live tail (no StopAtEOF) — Next blocks waiting for new data.
+	})
+
+	// Long-lived ctx that we deliberately do NOT cancel; the test asserts
+	// that Close alone is enough to unblock Next.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Drain the pre-existing line so the next Next blocks waiting for new data.
+	if rec := nextLine(t, ctx, tr); string(rec.Line) != "first" {
+		t.Fatalf("first line = %q, want %q", rec.Line, "first")
+	}
+
+	// Start a consumer that will block in Next.
+	done := make(chan struct{})
+	var consumerErr error
+	go func() {
+		defer close(done)
+		_, consumerErr = tr.Next(ctx)
+	}()
+
+	// Give the consumer a moment to enter its blocking call.
+	time.Sleep(50 * time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- tr.Close() }()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within 2s — closeCtx is not interrupting blocked Next")
+	}
+
+	select {
+	case <-done:
+		// Consumer should report exhaustion (closeCtx fired), not ctx.Err
+		// (the user's ctx is still alive).
+		if consumerErr == nil {
+			t.Fatal("consumer Next returned nil error after Close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer goroutine did not return after Close")
+	}
+}
+
 func TestTailer_CommitWithMeta(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

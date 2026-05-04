@@ -36,7 +36,10 @@ type LineOptions struct {
 // Buffer ownership: the []byte returned by Next is valid only until the next
 // call to Next or Close. Copy if you need to retain it.
 //
-// LineReader is not safe for concurrent use; Close may be called from any goroutine.
+// LineReader is not safe for concurrent use, including Close. To stop a
+// blocked Next from another goroutine, cancel the ctx passed to Next; once
+// Next has returned, Close may run on the same goroutine. [Tailer] coordinates
+// this internally via context.AfterFunc and a WaitGroup.
 type LineReader struct {
 	w    Watcher
 	opts LineOptions
