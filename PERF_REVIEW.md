@@ -6,11 +6,36 @@ and goroutine value, dead/redundant code, and OS file-handling correctness.
 
 Tests pass cleanly (`go test -count=1 -short ./watch/... ./tail/... ./forward/...`).
 
+## Status
+
+| Item | Status | Commit |
+|------|--------|--------|
+| H1 — drop Forwarder feeder | **DONE** | `45e13fb` |
+| H2 — `feederDrained` dead code | **DONE** (subsumed by H1) | `45e13fb` |
+| H3 — single-fd architecture | **DONE** | `45e13fb` |
+| H4 — Unix stat-only inode | **DONE** | `45e13fb` |
+| H5 — cache fsnotify clean target | **DONE** | `45e13fb` |
+| H6 — drop `Tailer.mu` around `t.lr` | **DONE** | `45e13fb` |
+| M1 — `OnTruncated` closure wrap | **DONE** | `45e13fb` |
+| M2 — half-populated `OnRotated` Position | **DONE** | `877e5d6` |
+| M3 — dead Phase-3 `Seek` | **DONE** (eliminated by H3) | `45e13fb` |
+| M4 — document `trimLine` in-place append | **DONE** | `877e5d6` |
+| M5 — `jitteredBackoff` overflow loop | **DONE** | `45e13fb` |
+| M6 — `time.After` → `time.NewTimer` | **DONE** | `45e13fb` |
+| M7 — `RecordingSink.All` preallocation | **DONE** | `877e5d6` |
+| L1 — `openFirst` switch → if/else | **DONE** (incidental in H3 rewrite) | `45e13fb` |
+| L2 — `Logrotate.Enumerate` redundant `HasPrefix` | open | — |
+| L3 — `MemorySource` naming collision | open | — |
+| L4 — `maxMetaBytes` check before marshal | open | — |
+| L5 — `cmd/gotail` two writes per record | open | — |
+
 ---
 
 ## High-impact findings
 
 ### H1. `forward.Forwarder.Run` feeder goroutine + buffered channel — dubious value, can be removed entirely
+
+> **DONE** in `45e13fb`. `RecordSource` switched to `Next(ctx)`; `Forwarder.Run` uses per-call `context.WithDeadline` for `MaxBatchAge`. Feeder goroutine, `recCh`, `recItem`, `feederDrained`, and `PrefetchBuffer` removed.
 
 `forward/forward.go:147` allocates a buffered `recCh` and spawns a feeder
 goroutine (`forward/forward.go:156`). The justification is "let
@@ -42,6 +67,8 @@ unbuffered — but here the channel itself is removable.
 
 ### H2. `feederDrained` is effectively dead with the standard `RecordSource`
 
+> **DONE** in `45e13fb` (subsumed by H1 — feeder goroutine and atomic both removed).
+
 `forward/forward.go:154-169`. The standard `tail.Tailer.Records` iterator
 always yields an error before exiting (it never naturally exits without
 yielding). So the feeder's range loop always exits via
@@ -57,6 +84,8 @@ having the consumer re-check via `errors.Is(item.err, tail.ErrSourceExhausted)`
 exclusively.
 
 ### H3. Watcher and LineReader hold two file descriptors per file (duplicate open + duplicate stat)
+
+> **DONE** in `45e13fb`. Watchers no longer own an `*os.File`; rotation detected purely via inode comparison on `os.Stat(path)`. `watch.PreRotation` and `Event.PreRotation` removed from public API. Trailing-bytes drain now relies entirely on the LineReader's fd, which keeps the rotated-out inode alive until EOF.
 
 `watch/poll.go:165` (Watcher first open) + `watch/linereader.go:230`
 (LineReader `switchToFile` open) — every active file has two open fds, two
@@ -88,6 +117,8 @@ API in the same shot since nothing internal consumes it.
 
 ### H4. Rotation polling check opens + closes the path on every cycle (Unix could just stat)
 
+> **DONE** in `45e13fb`. Added per-platform `statSizeInode`: single `os.Stat` on Unix, open-stat-close on Windows (file index requires a handle). Used by both watchers and `watch.StatInode`.
+
 `watch/poll.go:230` and `watch/fsnotify_unix.go:214` —
 `isRotated`/`fsnIsRotated` calls `os.Open(path)` + `defer Close()` to read
 the inode of the path-side file. On Unix, the inode is available from a
@@ -101,6 +132,8 @@ existing `fileID(*os.File)`) and call it from `isRotated`. Same change
 applies to `tail.findFileByInode`/`watch.StatInode` (`watch/watch.go:100-107`).
 
 ### H5. `fsnotify_unix.go:271`/`280` — `filepath.Clean` per event
+
+> **DONE** in `45e13fb`. `target := filepath.Clean(c.Path)` cached on the watcher struct at construction.
 
 ```go
 target := filepath.Clean(w.c.Path)
@@ -117,6 +150,8 @@ on Linux; verify on macOS/BSD). At minimum, cache the target.
 
 ### H6. `Tailer.mu` around `t.lr` is unnecessary
 
+> **DONE** in `45e13fb`. Locks dropped from `advance`, `Next`, and `Close`. Single-writer invariant documented on the field.
+
 `tail/tail.go:257-259, 327-329, 355-357, 439-441`. `t.lr` is written in
 `openFile` (called only from `New` and `advance`) and `advance` runs inside
 `Next`. `Next` is documented as not safe for concurrent use; `Close` waits
@@ -131,6 +166,8 @@ don't protect anything that isn't already serialized by `activeNext`. Keep
 ## Medium-impact findings
 
 ### M1. `tail.openFile` wraps `OnTruncated` in an identity closure
+
+> **DONE** in `45e13fb`. Direct assignment now (`Position` is a type alias for `watch.Position`).
 
 `tail/tail.go:225-229`:
 
@@ -148,6 +185,8 @@ each rotation/advance (rare but free).
 
 ### M2. `tail.advance` emits a half-populated `Position` to `OnRotated`
 
+> **DONE** in `877e5d6`. Best-effort `watch.StatInode(nextPath)` populates `Inode`; `Offset` is genuinely zero for a backup-advance.
+
 `tail/tail.go:284`: `t.opts.OnRotated(prev, Position{File: nextPath})` —
 `Inode` and `Offset` are zero. This is asymmetric with `from = prev` which
 is fully populated. Either populate from a quick `watch.StatInode(nextPath)`
@@ -158,12 +197,16 @@ quietly depend on this.
 
 ### M3. `pollWatcher` Phase-3 truncation `Seek` is dead I/O
 
+> **DONE** in `45e13fb` (eliminated by H3 — watchers no longer own an fd, so there's no fd to seek).
+
 `watch/poll.go:103`, `watch/fsnotify_unix.go:106`. The watcher seeks its
 own fd to 0 after detecting truncation, but never reads from this fd. The
 seek doesn't affect the LineReader's separate fd. It's a no-op syscall.
 Drop it (and the related error path).
 
 ### M4. Allocation in `LineReader.trimLine` when `KeepNewline=true`
+
+> **DONE** in `877e5d6`. Documenting comment added explaining the in-place `\n` trick.
 
 `watch/linereader.go:258`: `raw = append(raw, '\n')`. This is in-place when
 `cap(raw)` is sufficient (the trailing `\n` byte is at exactly
@@ -177,6 +220,8 @@ geometry. Worth a one-line comment:
 code change needed; just don't accidentally "fix" it later.
 
 ### M5. `Forwarder.jitteredBackoff` overflow loop
+
+> **DONE** in `45e13fb`. Replaced with bit-shift + 62-bit cap.
 
 `forward/forward.go:309-322`. The loop multiplies by 2 each attempt, with
 an overflow check inside. Cleaner and faster:
@@ -194,12 +239,16 @@ Not hot, just simpler.
 
 ### M6. `Forwarder.sendWithRetry` uses `time.After` (untracked timer)
 
+> **DONE** in `45e13fb`. `time.NewTimer(d)` + `Stop()` per iteration.
+
 `forward/forward.go:300`: `case <-time.After(d):`. Every retry leaks a
 `*Timer` until it fires, even when the ctx-done case wins. On a
 permanently-failing sink this builds up. Use `time.NewTimer(d)` +
 `defer t.Stop()` per iteration.
 
 ### M7. `forwardtest.RecordingSink.All` reallocates on every call
+
+> **DONE** in `877e5d6`. Replaced with `slices.Concat(s.batches...)`.
 
 `forwardtest/sinks.go:41-47` — appends without preallocating. Test-only,
 but trivial: `out := make([]T, 0, totalLen)`.
@@ -209,6 +258,8 @@ but trivial: `out := make([]T, 0, totalLen)`.
 ## Low-impact / simplification
 
 ### L1. `pollWatcher.openFirst`'s `case`-based resume branch is awkward
+
+> **DONE** in `45e13fb` (incidental in the H3 rewrite — `openFirst` now uses `if/else`).
 
 `watch/poll.go:185-200` (and the fsnotify mirror). The
 `switch { case A: ...; default: ...log; }` form would read more naturally
@@ -245,44 +296,37 @@ instead and emit one `Write`, but the gain is microscopic.
 
 | Site | Pattern | Verdict |
 |------|---------|---------|
-| `forward/forward.go:156` feeder goroutine + buffered `recCh` (default 16) | Convert blocking iterator into select-able stream | **Removable** — see H1 |
-| `tail/tail.go:183` `done chan struct{}` (unbuffered, 0-size) | One-shot signal for `StopAtEOF` | Keep — already unbuffered |
-| `tail/tail.go:323` `context.AfterFunc` for `closeCtx → cancel` | Plumbs Close into in-flight `Next`'s ctx | Keep — clean pattern |
-| `tail/tail.go:437` `activeNext.Wait()` | Serializes Close with active Next | Keep |
+| ~~`forward/forward.go:156` feeder goroutine + buffered `recCh`~~ | ~~Convert blocking iterator into select-able stream~~ | **REMOVED in `45e13fb` (H1)** |
+| `tail/tail.go` `done chan struct{}` (unbuffered, 0-size) | One-shot signal for `StopAtEOF` | Keep — already unbuffered |
+| `tail/tail.go` `context.AfterFunc` for `closeCtx → cancel` | Plumbs Close into in-flight `Next`'s ctx | Keep — clean pattern |
+| `tail/tail.go` `activeNext.Wait()` | Serializes Close with active Next | Keep |
 | `pollWatcher.sleep` `time.NewTimer` | Cancellable sleep | Keep |
 | `fsnotifyWatcher.fsnWait` select on lib's `Events`/`Errors` | Required by fsnotify API | Keep |
-| `forward.sendWithRetry` `<-time.After(d)` | Backoff sleep | **Switch to NewTimer** — see M6 |
+| ~~`forward.sendWithRetry` `<-time.After(d)`~~ | ~~Backoff sleep~~ | **`time.NewTimer` in `45e13fb` (M6)** |
 
-**Net**: the only owned channel/goroutine pipeline that warrants
-questioning is the Forwarder feeder (H1). Everything else is either a
-one-shot signal or library-imposed.
+**Net**: after H1+M6, no owned goroutines remain in the production code
+paths. Channels in use are either one-shot signals or library-imposed.
 
 ---
 
 ## File handling & rotation correctness
 
-The state machine is correct, but the duplicate-fd architecture (H3)
-creates a real (if narrow) race window between `Watcher.openFirst` and
-`LineReader.switchToFile`: if rotation lands in that microsecond gap, the
-two fds point at different inodes. The system mostly self-heals because
-the next `Wait` will detect the inode mismatch and emit `ReOpened` — but
-the LineReader's first read happens against a different file than the
-Watcher's "old" fd. Fix is the fd-transfer refactor in H3.
+After H3 the duplicate-fd architecture and its race window are gone.
+The watcher stats the path; the LineReader holds the only fd to the
+active file and its existing reads naturally drain trailing bytes on
+the rotated-out inode (the kernel keeps the inode alive while the fd
+is held).
 
-The race-aware drain at `watch/poll.go:142-155` (re-stat after rotation
-detection) is correct and the inline doc comment is good. The `oldFile`
-lifecycle (kept open until next `Wait`) is correct.
+The **copytruncate** path is still double-defended:
 
-The **copytruncate** path is double-defended:
-
-1. Watcher's Phase-3 stat detects size shrink and emits `Truncated`.
+1. Watcher's Phase-4 stat detects size < watermark and emits `Truncated`.
 2. LineReader's own EOF-stat-trunc check at `watch/linereader.go:149-162`
-   catches the case where the LineReader hits EOF before the Watcher polls
-   again.
+   catches the case where the LineReader hits EOF before the watcher's
+   next poll/event fires.
 
 Both reset to offset 0 and re-seek. Correct.
 
-The **`StopAtEOF` for backups** at `tail/tail.go:211`
+The **`StopAtEOF` for backups** in `Tailer.openFile`
 (`!isActive || t.opts.StopAtEOF`) ensures rotation through old files
 terminates cleanly. Correct.
 
@@ -301,19 +345,14 @@ is the right call.
 
 ---
 
-## Recommended order of attack
+## Outcome
 
-1. **H1** (drop Forwarder feeder) — biggest simplification, cuts the only
-   owned goroutine pipeline.
-2. **H6** (drop Tailer `mu` around `t.lr`) — pure cleanup, no behaviour
-   change.
-3. **M1, M3, M6** (closure wrap, dead seek, `time.After` → `NewTimer`) —
-   small targeted fixes.
-4. **H4, H5** (Unix stat-only inode, cache fsnotify target) — minor perf,
-   easy.
-5. **H3** (single-fd refactor + drop `PreRotation` from public API) —
-   biggest design change; only do if you're willing to break the
-   `watch.Event.PreRotation` contract pre-1.0.
+All H- and M-tier items shipped across two commits:
 
-Skip H1+H3 if you're past the point where you can take API-shape changes;
-they're the high-value moves but the riskiest.
+- `45e13fb` — H1, H2, H3, H4, H5, H6, M1, M3, M5, M6, L1.
+  Net **−336 lines**; tests green under `-race` for both default and
+  `gotail_nofsnotify` build tags.
+- `877e5d6` — M2, M4, M7. Tiny follow-up batch.
+
+Remaining open items are L2–L5 (low-impact / stylistic). None affect
+behavior or performance.
