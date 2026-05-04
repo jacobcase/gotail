@@ -3,6 +3,7 @@ package watch_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -327,7 +328,7 @@ func TestStopAtEOF(t *testing.T) {
 	w.Wait(ctx) //nolint:errcheck
 	// Should return EOF.
 	_, err := w.Wait(ctx)
-	if err != io.EOF {
+	if !errors.Is(err, io.EOF) {
 		t.Fatalf("expected io.EOF, got %v", err)
 	}
 }

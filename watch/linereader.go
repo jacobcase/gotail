@@ -3,6 +3,7 @@ package watch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -129,7 +130,7 @@ func (l *LineReader) Next(ctx context.Context) (line []byte, pos Position, err e
 				l.tail += n
 				continue
 			}
-			if rerr != nil && rerr != io.EOF {
+			if rerr != nil && !errors.Is(rerr, io.EOF) {
 				return nil, l.pos, fmt.Errorf("watch: read: %w", rerr)
 			}
 			// Source hit EOF.

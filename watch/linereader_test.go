@@ -2,6 +2,7 @@ package watch_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -52,7 +53,7 @@ func TestLineReader_Basic(t *testing.T) {
 	}
 
 	_, _, err = lr.Next(ctx)
-	if err != io.EOF {
+	if !errors.Is(err, io.EOF) {
 		t.Fatalf("expected io.EOF at end of StopAtEOF file, got %v", err)
 	}
 }
@@ -297,7 +298,7 @@ func FuzzLineReader(f *testing.F) {
 		var got []byte
 		for {
 			line, _, err := lr.Next(ctx)
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {

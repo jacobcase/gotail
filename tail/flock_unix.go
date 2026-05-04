@@ -3,6 +3,7 @@
 package tail
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -19,7 +20,7 @@ func acquireFlock(path string) (*flock, error) {
 
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		if err == syscall.EWOULDBLOCK {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, ErrLockHeld
 		}
 		return nil, fmt.Errorf("tail: flock %s: %w", path, err)

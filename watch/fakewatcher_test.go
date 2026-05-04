@@ -2,6 +2,7 @@ package watch_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -36,7 +37,7 @@ func TestFakeWatcher_SubsequentWaitReturnsEOF(t *testing.T) {
 		t.Fatalf("Wait #1: %v", err)
 	}
 	_, err := w.Wait(context.Background())
-	if err != io.EOF {
+	if !errors.Is(err, io.EOF) {
 		t.Fatalf("Wait #2: want io.EOF, got %v", err)
 	}
 }
@@ -48,7 +49,7 @@ func TestFakeWatcher_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := w.Wait(ctx); err == nil || err == io.EOF {
+	if _, err := w.Wait(ctx); err == nil || errors.Is(err, io.EOF) {
 		t.Fatalf("Wait on cancelled ctx: want ctx error, got %v", err)
 	}
 }
