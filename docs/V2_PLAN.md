@@ -472,7 +472,7 @@ type Options[T any] struct {
 
     // Hooks. OnCommitted fires after a successful Sink.Send + Source.Commit;
     // distinct from L2's OnCheckpoint (which fires on Cursor.Save).
-    OnBatchSent    func(records int, bytes int, latency time.Duration)
+    OnBatchSent    func(records int, bytes int, pos Position, latency time.Duration)
     OnSendError    func(err error, attempt int, willRetry bool)
     OnCommitted    func(pos Position)
     OnDecodeError  func(line []byte, pos Position, err error)
@@ -721,7 +721,7 @@ WithFileMode(os.FileMode)         // default 0o600
 | L2 | `OnTruncated` | `func(at Position)` | File size dropped below current position |
 | L2 | `OnCheckpoint` | `func(c Checkpoint)` | Cursor.Save returned successfully |
 | L2 | `OnError` | `func(err error)` | Non-fatal error during tail |
-| L3 | `OnBatchSent` | `func(records int, bytes int, latency time.Duration)` | Sink.Send returned nil |
+| L3 | `OnBatchSent` | `func(records int, bytes int, pos Position, latency time.Duration)` | Sink.Send returned nil |
 | L3 | `OnSendError` | `func(err error, attempt int, willRetry bool)` | Sink.Send returned err |
 | L3 | `OnCommitted` | `func(pos Position)` | Forwarder advanced cursor (post Sink.Send + Source.Commit success) |
 | L3 | `OnDecodeError` | `func(line []byte, pos Position, err error)` | Decoder failed; line is being skipped |
@@ -742,7 +742,7 @@ batchesSent := prometheus.NewCounter(...)
 batchBytes := prometheus.NewHistogram(...)
 
 forward.New(forward.Options[[]byte]{
-    OnBatchSent: func(records int, bytes int, latency time.Duration) {
+    OnBatchSent: func(records int, bytes int, pos forward.Position, latency time.Duration) {
         batchesSent.Inc()
         batchBytes.Observe(float64(bytes))
     },
@@ -1406,7 +1406,6 @@ that explicitly rather than fabricating a review back-reference.
 
 | Plan reference | What the plan committed | What ships today | Driver |
 |---|---|---|---|
-| §4 L3 Options | `OnBatchSent func(records int, bytes int, latency time.Duration)` | Signature changed: `OnBatchSent func(n int, pos Position)`. **Both** `bytes` and `latency` were dropped from the hook payload; `pos` was added. Metrics consumers cannot derive batch-bytes or send latency from this hook. | Pre-review (shipped before reviews). |
 | §3 ext, §5.2 | `tail.WithoutInodeCheck()` cursor option | Renamed to a flag on `tail.Options.NoInodeCheck bool`. Functionally close, but the option is on `Options`, not on `FileCursorOption`, because inode comparison happens in the watcher / `findFileByInode`, not inside the cursor. | Pre-review (design-time choice). |
 | Decision #4 | “Drop `golang.org/x/sys` dependency.” | Direct dep is dropped (`go.mod` shows it only `// indirect`), but it is still pulled in transitively by `fsnotify`. Spirit-of-the-plan compliance, not letter. | [PERF_REVIEW §H4](./reviews/PERF_REVIEW.md) tightened the stat path to a stdlib-only `statSizeInode` helper, eliminating the last in-tree x/sys touchpoints. The transitive pull from fsnotify remains. |
 
@@ -1591,8 +1590,10 @@ deltas are:
 - **`WithCursorMigration` now ships** (§C1): schema bumps can land with a
   user-supplied migrator; `ErrUnsupportedCursorVersion` is still the sentinel
   when no migrator is configured.
-- **`forward.OnBatchSent` lost `bytes` and `latency`** (§11.1). Metrics
-  pipelines wired to the plan’s signature will not compile.
+- **`forward.OnBatchSent` carries `(records, bytes, pos, latency)`** —
+  superset of the plan's three-arg signature plus the runtime-useful
+  position. Latency is the duration of the successful `Sink.Send` only
+  (excludes batch fill and failed retries).
 - **`forward.RecordSource` is pull-style** (§11.2 #2): third-party
   sources must implement `Next`, not `Records`.
 - **Forwarder exhaustion now honours both paths**: `tail.ErrSourceExhausted`

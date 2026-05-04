@@ -77,7 +77,12 @@ type Options[T any] struct {
 	// Hooks — all optional and nil-safe. Hooks are invoked synchronously
 	// from the batching loop and must not block; offload slow work to a
 	// goroutine or buffered channel if needed.
-	OnBatchSent    func(n int, pos Position)
+	// OnBatchSent fires after Sink.Send returns nil and Source.Commit completes.
+	// records is the count of decoded items in the batch; bytes is the sum of
+	// raw line lengths; pos is the last record's Position; latency is the
+	// duration of the successful Sink.Send call (excludes batch fill time and
+	// excludes any failed retry attempts — only the final, successful call).
+	OnBatchSent    func(records int, bytes int, pos Position, latency time.Duration)
 	OnSendError    func(err error, attempt int, willRetry bool)
 	OnCommitted    func(pos Position)
 	OnDecodeError  func(line []byte, pos Position, err error)
@@ -166,7 +171,7 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 		// sendWithRetry uses the parent ctx, not runCtx: Source.Done()
 		// signals "no more new records" — the in-flight batch should still
 		// be delivered. Only parent-ctx cancellation aborts retries.
-		err := f.sendWithRetry(ctx, batch, batchLastPos)
+		err := f.sendWithRetry(ctx, batch, batchBytes, batchLastPos)
 		batch = batch[:0]
 		batchBytes = 0
 		batchStart = time.Time{}
@@ -243,10 +248,12 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 // sendWithRetry calls Sink.Send with exponential backoff. On success it commits
 // the position and fires OnCommitted / OnBatchSent. It returns ctx.Err() if the
 // context is cancelled during a backoff sleep.
-func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, pos Position) error {
+func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, bytes int, pos Position) error {
 	for attempt := 0; ; attempt++ {
+		sendStart := time.Now()
 		err := f.opts.Sink.Send(ctx, batch)
 		if err == nil {
+			latency := time.Since(sendStart)
 			if cerr := f.opts.Source.Commit(ctx, pos); cerr != nil {
 				f.opts.Logger.Warn("forward: commit failed", "err", cerr, "offset", pos.Offset)
 			}
@@ -254,7 +261,7 @@ func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, pos Positio
 				f.opts.OnCommitted(pos)
 			}
 			if f.opts.OnBatchSent != nil {
-				f.opts.OnBatchSent(len(batch), pos)
+				f.opts.OnBatchSent(len(batch), bytes, pos, latency)
 			}
 			return nil
 		}

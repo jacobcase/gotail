@@ -963,6 +963,67 @@ func TestForwarder_HonoursSourceDone(t *testing.T) {
 	}
 }
 
+// TestForwarder_OnBatchSent_FullSignature pins the §11.1 #1 fix: the hook
+// receives records, bytes, pos, and latency — the four pieces of info plan
+// §4 L3 promised plus the position the implementation found useful.
+// Latency reflects the successful Sink.Send call duration only (excludes
+// batch fill time and failed retries).
+func TestForwarder_OnBatchSent_FullSignature(t *testing.T) {
+	src := &finiteSource{records: []tail.Record{
+		{Line: []byte("alpha"), Pos: tail.Position{File: "x", Inode: 1, Offset: 5}},
+		{Line: []byte("beta"), Pos: tail.Position{File: "x", Inode: 1, Offset: 10}},
+		{Line: []byte("gammaaa"), Pos: tail.Position{File: "x", Inode: 1, Offset: 17}},
+	}}
+
+	const sleep = 60 * time.Millisecond
+	sink := forward.SinkFunc[[]byte](func(_ context.Context, _ [][]byte) error {
+		time.Sleep(sleep)
+		return nil
+	})
+
+	var (
+		gotRecords int
+		gotBytes   int
+		gotPos     forward.Position
+		gotLatency time.Duration
+		fired      int
+	)
+	fwd := mustNewForwarder(t, forward.Options[[]byte]{
+		Source:          src,
+		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:            sink,
+		MaxBatchRecords: 100, // single batch
+		OnBatchSent: func(records int, bytes int, pos forward.Position, latency time.Duration) {
+			gotRecords = records
+			gotBytes = bytes
+			gotPos = pos
+			gotLatency = latency
+			fired++
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := fwd.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if fired != 1 {
+		t.Fatalf("OnBatchSent fired %d times, want 1", fired)
+	}
+	if gotRecords != 3 {
+		t.Fatalf("records: got %d, want 3", gotRecords)
+	}
+	if want := len("alpha") + len("beta") + len("gammaaa"); gotBytes != want {
+		t.Fatalf("bytes: got %d, want %d", gotBytes, want)
+	}
+	if gotPos.Offset != 17 {
+		t.Fatalf("pos.Offset: got %d, want 17 (last record)", gotPos.Offset)
+	}
+	if gotLatency < sleep/2 {
+		t.Fatalf("latency: got %v, want at least ~%v (Sink slept %v)", gotLatency, sleep/2, sleep)
+	}
+}
+
 // TestForwarder_CtxCancelStillReturnsCtxErr pins that parent-ctx
 // cancellation is distinguished from Source.Done() — the former returns
 // ctx.Err(), the latter returns nil.

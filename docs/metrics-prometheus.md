@@ -40,6 +40,15 @@ var (
         Name: "gotail_decode_errors_total",
         Help: "Lines skipped due to decode errors.",
     })
+    bytesShipped = promauto.NewCounter(prometheus.CounterOpts{
+        Name: "gotail_bytes_shipped_total",
+        Help: "Total bytes (sum of raw line lengths) delivered to sink.",
+    })
+    sendLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+        Name:    "gotail_send_latency_seconds",
+        Help:    "Latency of successful Sink.Send calls.",
+        Buckets: prometheus.DefBuckets,
+    })
 )
 
 // TailerOpts returns tail.Options with Prometheus hooks wired in.
@@ -53,11 +62,13 @@ func TailerOpts(base tail.Options) tail.Options {
 // ForwarderOpts returns forward.Options with Prometheus hooks wired in.
 func ForwarderOpts[T any](base forward.Options[T]) forward.Options[T] {
     innerBatchSent := base.OnBatchSent
-    base.OnBatchSent = func(n int, pos forward.Position) {
+    base.OnBatchSent = func(n int, bytes int, pos forward.Position, latency time.Duration) {
         batchesSent.Inc()
         linesProcessed.Add(float64(n))
+        bytesShipped.Add(float64(bytes))
+        sendLatency.Observe(latency.Seconds())
         if innerBatchSent != nil {
-            innerBatchSent(n, pos)
+            innerBatchSent(n, bytes, pos, latency)
         }
     }
     base.OnSendError = func(_ error, _ int, willRetry bool) {
