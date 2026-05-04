@@ -1,11 +1,12 @@
 package tail
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -136,8 +137,8 @@ func (s *lumberjackSource) Enumerate(_ context.Context) ([]string, error) {
 		backups = append(backups, backup{path: p, ts: ts})
 	}
 
-	sort.Slice(backups, func(i, j int) bool {
-		return backups[i].ts.Before(backups[j].ts)
+	slices.SortFunc(backups, func(a, b backup) int {
+		return a.ts.Compare(b.ts)
 	})
 
 	result := make([]string, 0, len(backups)+1)
@@ -193,7 +194,7 @@ func (g *globSource) Enumerate(_ context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tail: glob %q: %w", g.backupGlob, err)
 	}
-	sort.Strings(matches)
+	slices.Sort(matches)
 	return append(matches, g.activePath), nil
 }
 
@@ -272,8 +273,8 @@ func (s *logrotateSource) Enumerate(_ context.Context) ([]string, error) {
 		backups = append(backups, backup{path: p, age: n})
 	}
 
-	sort.Slice(backups, func(i, j int) bool {
-		return backups[i].age > backups[j].age // oldest (largest N) first
+	slices.SortFunc(backups, func(a, b backup) int {
+		return cmp.Compare(b.age, a.age) // descending: oldest (largest N) first
 	})
 
 	result := make([]string, 0, len(backups)+1)
