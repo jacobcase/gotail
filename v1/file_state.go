@@ -5,8 +5,6 @@ import (
 	"io"
 	"os"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 // TODO: file creation time (or birth time) isn't universally supported the same
@@ -58,46 +56,36 @@ func (s *FileState) readInfo(i os.FileInfo) error {
 	s.Size = i.Size()
 
 	switch stat_t := i.Sys().(type) {
-	case *unix.Stat_t:
-		s.Inode = stat_t.Ino
 	case *syscall.Stat_t:
 		s.Inode = stat_t.Ino
 	default:
-		return errors.New("file stat isn't *unix.Stat_t type")
+		return errors.New("file stat isn't *syscall.Stat_t type")
 	}
 	return nil
 }
 
 // NewFileState will initialize a FileState with the inode, size, and position
-// of the provided file. Currently does not support windows, or anything that
-// isn't a *syscall.Stat_t or *unix.Stat_t in the underlying stat.
+// of the provided file.
 func NewFileState(f *os.File) (FileState, error) {
 	stat, err := f.Stat()
 	if err != nil {
 		return FileState{}, err
 	}
 
-	var inode uint64
-
 	switch stat_t := stat.Sys().(type) {
-	case *unix.Stat_t:
-		inode = stat_t.Ino
 	case *syscall.Stat_t:
-		inode = stat_t.Ino
+		pos, err := f.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return FileState{}, err
+		}
+		return FileState{
+			Size:     stat.Size(),
+			Inode:    stat_t.Ino,
+			Position: pos,
+		}, nil
 	default:
-		return FileState{}, errors.New("file stat isn't *unix.Stat_t type")
+		return FileState{}, errors.New("file stat isn't *syscall.Stat_t type")
 	}
-
-	pos, err := f.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return FileState{}, err
-	}
-
-	return FileState{
-		Size:     stat.Size(),
-		Inode:    inode,
-		Position: pos,
-	}, nil
 }
 
 func NewFileStateFromPath(p string) (*FileState, error) {

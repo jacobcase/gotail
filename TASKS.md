@@ -20,13 +20,13 @@ This is the executable task list for implementing v2 of gotail. Read [V2_PLAN.md
 
 **Goal:** prepare the repo for v2 work. No library code yet.
 
-- [ ] Create a `v2` branch off `main` (already on `v2-design-plan`; rebase or branch from there as appropriate).
-- [ ] Bump `go.mod` directive to `go 1.26` (or later if 1.26 is GA at implementation time).
-- [ ] Update module path to `github.com/jacobcase/gotail/v2` per Go module versioning convention (Decision #1).
-- [ ] Remove `golang.org/x/sys` from `go.mod` (Decision #4 — stdlib `syscall` is sufficient).
-- [ ] Add `.golangci.yml` enabling: `govet`, `errcheck`, `ineffassign`, `unused`, `gosimple`, `staticcheck`.
-- [ ] Add `.github/workflows/ci.yml` with matrix: `{linux, macos, windows} × {1.26}`. Run `go vet`, `go test -race`, `staticcheck`, cross-compile check.
-- [ ] (Optional) Move existing v1 code under `v1/` so tests still pass while new packages are built. Alternative: leave v1 on `main` and start v2 fresh.
+- [x] Create a `v2` branch off `main` (working on `v2-design-plan`).
+- [x] Bump `go.mod` directive to `go 1.26`.
+- [x] Update module path to `github.com/jacobcase/gotail/v2` per Go module versioning convention (Decision #1).
+- [x] Remove `golang.org/x/sys` from `go.mod` (Decision #4 — stdlib `syscall` is sufficient).
+- [x] Add `.golangci.yml` enabling: `govet`, `errcheck`, `ineffassign`, `unused`, `gosimple`, `staticcheck`.
+- [x] Add `.github/workflows/ci.yml` with matrix: `{linux, macos, windows} × {1.26}`. Run `go vet`, `go test -race`, `staticcheck`, cross-compile check.
+- [x] Move existing v1 code under `v1/` (fixed `file_state.go` to drop `unix.Stat_t` branch; all v1 tests pass).
 
 **Deliverable:** repo builds clean on Go 1.26, CI is green on the empty (or v1-relocated) tree.
 
