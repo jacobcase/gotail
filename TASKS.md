@@ -53,27 +53,26 @@ watch/
 
 ### Sub-tasks
 
-- [ ] `watch/watch.go`: define `Position` struct (`File string`, `Inode uint64`, `Offset int64`) with JSON tags per §4. Add `Position.IsZero() bool` (§5.10 #11).
-- [ ] `watch/watch.go`: define `Event` struct (`Path`, `Pos`, `ReOpened`, `Truncated`, `PreRotation *PreRotation`).
-- [ ] `watch/watch.go`: define `PreRotation` struct (`Reader io.Reader`, `FinalSize int64`, `StartPos int64`). Reader valid until next `Wait` or `Close`.
-- [ ] `watch/watch.go`: define `Watcher` interface: `Wait(ctx) (Event, error)`, `Close() error`.
-- [ ] `watch/watch.go`: define `Config` (`Path`, `Interval`, `Whence`, `Resume *Position`, `StopAtEOF`, `Logger`, `NoInodeCheck`).
-- [ ] `watch/watch.go`: define sentinel errors `ErrUnsupported`, `ErrInodeMismatch`, `ErrTruncated`, `ErrLineTooLong`.
-- [ ] `watch/stat_unix.go` (`//go:build unix`): `func statInode(fi os.FileInfo) uint64` reading `syscall.Stat_t.Ino`. Stdlib only.
-- [ ] `watch/stat_windows.go` (`//go:build windows`): `func statInode(f *os.File) uint64` calling `syscall.GetFileInformationByHandle` and combining `nFileIndexHigh<<32 | nFileIndexLow`. Doc that this is unstable on ReFS / some network FS.
-- [ ] `watch/poll.go`: `NewPolling(c Config) (Watcher, error)`. Port from `poll_watcher.go` preserving the race-aware rotation logic at lines 131-143 (re-stat the open fd before rotating to drain trailing bytes — surface those bytes via `PreRotation.Reader`).
-- [ ] `watch/poll.go`: drop the unused mutex (`poll_watcher.go:21`). Drop `cancel chan struct{}`; use ctx throughout.
-- [ ] `watch/poll.go`: respect `StopAtEOF` — when set, return `io.EOF` once the file is exhausted instead of polling forever.
-- [ ] `watch/poll.go`: respect `NoInodeCheck` — skip the inode equality check on resume and on rotation detection.
-- [ ] `watch/linereader.go`: `LineReader` with **owned buffer** (§6 strategy 1). Fields: `buf []byte`, `head int`, `tail int`, `pos Position`. No `bufio.Reader`; manual scan via `bytes.IndexByte`.
-- [ ] `watch/linereader.go`: `LineOptions` (`BufferSize`, `MaxLine` default 1 MiB, `KeepNewline` default false).
-- [ ] `watch/linereader.go`: `NewLineReader(w Watcher, opts LineOptions) *LineReader`. LineReader opens its own `*os.File` against `Event.Path` — Watcher signals only.
-- [ ] `watch/linereader.go`: `Next(ctx) (line []byte, pos Position, err error)`. Returned slice valid until next `Next` or `Close`. Trim CR (preserve `line_reader.go:140-144` behavior).
-- [ ] `watch/linereader.go`: on rotation event, drain `Event.PreRotation.Reader` first, then reopen against new path; reuse the existing buffer (don't allocate a fresh `bufio.NewReader`) — §6 strategy 3.
-- [ ] `watch/linereader.go`: enforce `MaxLine` — return `ErrLineTooLong`, advance past next newline so caller can resume.
-- [ ] `watch/linereader.go`: `Position() Position`, `Close() error`.
-- [ ] `watch/fakewatcher.go`: `FakeWatcher(path string, pos Position) Watcher` — emits one `ReOpened` event then EOF. For unit-testing LineReader without polling.
-- [ ] `watch/doc.go`: package overview, vocabulary (Position only at this layer), buffer ownership rule.
+- [x] `watch/watch.go`: define `Position` struct (`File string`, `Inode uint64`, `Offset int64`) with JSON tags per §4. Add `Position.IsZero() bool` (§5.10 #11).
+- [x] `watch/watch.go`: define `Event` struct (`Path`, `Pos`, `ReOpened`, `Truncated`, `PreRotation *PreRotation`).
+- [x] `watch/watch.go`: define `PreRotation` struct (`Reader io.Reader`, `FinalSize int64`, `StartPos int64`). Reader valid until next `Wait` or `Close`.
+- [x] `watch/watch.go`: define `Watcher` interface: `Wait(ctx) (Event, error)`, `Close() error`.
+- [x] `watch/watch.go`: define `Config` (`Path`, `Interval`, `Whence`, `Resume *Position`, `StopAtEOF`, `Logger`, `NoInodeCheck`).
+- [x] `watch/watch.go`: define sentinel errors `ErrUnsupported`, `ErrInodeMismatch`, `ErrTruncated`, `ErrLineTooLong`.
+- [x] `watch/stat_unix.go` (`//go:build unix`): `func fileInode(fi os.FileInfo) uint64` reading `syscall.Stat_t.Ino`. Stdlib only.
+- [x] `watch/stat_windows.go` (`//go:build windows`): `func fileInodeFromHandle` via `syscall.GetFileInformationByHandle`. Doc that this is unstable on ReFS / some network FS.
+- [x] `watch/poll.go`: `NewPolling(c Config) (Watcher, error)`. Race-aware rotation logic: re-stat old fd before switching; p.pos watermark emits trailing-bytes event before ReOpened.
+- [x] `watch/poll.go`: drop mutex and cancel chan; use ctx throughout.
+- [x] `watch/poll.go`: respect `StopAtEOF` — return `io.EOF` at exhaustion.
+- [x] `watch/poll.go`: respect `NoInodeCheck` — skip inode equality check.
+- [x] `watch/linereader.go`: `LineReader` with owned buffer, manual `bytes.IndexByte` scan, zero-alloc happy path.
+- [x] `watch/linereader.go`: `LineOptions` (`BufferSize`, `MaxLine` default 1 MiB, `KeepNewline` default false).
+- [x] `watch/linereader.go`: `NewLineReader(w Watcher, opts LineOptions) *LineReader`. LineReader opens its own `*os.File` — Watcher signals only.
+- [x] `watch/linereader.go`: `Next(ctx) (line []byte, pos Position, err error)`. CR stripping. Buffer reused across rotation.
+- [x] `watch/linereader.go`: `MaxLine` enforced in both fast-path (newline found but too long) and slow-path (no newline, buffer full). `ErrLineTooLong` returned; reader recovers.
+- [x] `watch/linereader.go`: `Position() Position`, `Close() error`.
+- [x] `watch/fakewatcher.go`: `FakeWatcher(path string, pos Position) Watcher`.
+- [x] `watch/doc.go`: package overview, vocabulary, buffer ownership rule.
 
 ### Tests (`watch/`)
 
