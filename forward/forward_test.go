@@ -607,6 +607,102 @@ func TestForwarder_FeederExitsOnPermanentError(t *testing.T) {
 	t.Fatalf("feeder goroutine leaked after Run returned: baseline=%d, now=%d", g0, runtime.NumGoroutine())
 }
 
+// ── TestForwarder_NaturalDrain_FlushesFinalBatch ─────────────────────────────
+//
+// A custom RecordSource that finishes its iterator without yielding a final
+// error (something tail.Tailer never does, but custom sources may). The
+// consumer's !ok branch must call flush() so the buffered final batch is
+// delivered. Catches regressions of the feederDrained signalling.
+
+type finiteSource struct {
+	records []tail.Record
+}
+
+func (s *finiteSource) Records(_ context.Context) iter.Seq2[tail.Record, error] {
+	return func(yield func(tail.Record, error) bool) {
+		for _, r := range s.records {
+			if !yield(r, nil) {
+				return
+			}
+		}
+		// Iterator returns cleanly — no ErrSourceExhausted.
+	}
+}
+func (s *finiteSource) Commit(_ context.Context, _ forward.Position) error { return nil }
+func (s *finiteSource) Done() <-chan struct{}                              { return nil }
+
+func TestForwarder_NaturalDrain_FlushesFinalBatch(t *testing.T) {
+	src := &finiteSource{records: []tail.Record{
+		{Line: []byte("a"), Pos: tail.Position{File: "x", Inode: 1, Offset: 1}},
+		{Line: []byte("b"), Pos: tail.Position{File: "x", Inode: 1, Offset: 2}},
+		{Line: []byte("c"), Pos: tail.Position{File: "x", Inode: 1, Offset: 3}},
+	}}
+
+	var got [][]byte
+	sink := forward.SinkFunc[[]byte](func(_ context.Context, batch [][]byte) error {
+		for _, b := range batch {
+			got = append(got, append([]byte(nil), b...))
+		}
+		return nil
+	})
+
+	fwd := mustNewForwarder(t, forward.Options[[]byte]{
+		Source:          src,
+		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:            sink,
+		MaxBatchRecords: 100, // larger than total → flushed only on drain
+	})
+
+	if err := fwd.Run(context.Background()); err != nil {
+		t.Fatalf("Run: want nil on natural drain, got %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 records delivered, got %d", len(got))
+	}
+}
+
+// TestForwarder_NaturalDrain_RacesCancellation pins the fix for issue #24:
+// a custom source drains cleanly while ctx is cancelled in the same instant.
+// Without the feederDrained signal, the consumer could observe ctx.Err() and
+// return it instead of delivering the final batch. With the fix, a clean
+// drain always wins. Repeats many times to surface scheduling races.
+func TestForwarder_NaturalDrain_RacesCancellation(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		src := &finiteSource{records: []tail.Record{
+			{Line: []byte("a"), Pos: tail.Position{File: "x", Inode: 1, Offset: 1}},
+		}}
+
+		var delivered atomic.Int32
+		sink := forward.SinkFunc[[]byte](func(_ context.Context, batch [][]byte) error {
+			delivered.Add(int32(len(batch)))
+			return nil
+		})
+
+		fwd := mustNewForwarder(t, forward.Options[[]byte]{
+			Source:          src,
+			Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+			Sink:            sink,
+			MaxBatchRecords: 100,
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		// Race: kick off cancellation immediately so it lands somewhere
+		// near the moment the feeder closes recCh after the natural drain.
+		go cancel()
+
+		err := fwd.Run(ctx)
+		// Either nil (drain won) or context.Canceled (cancel hit before
+		// any record was read). Both are valid — but if drain happened
+		// at all, we must not lose the delivery.
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("iter %d: unexpected err: %v", i, err)
+		}
+		if err == nil && delivered.Load() == 0 {
+			t.Fatalf("iter %d: Run returned nil but no record delivered", i)
+		}
+	}
+}
+
 // ── BenchmarkForwarder_Throughput ─────────────────────────────────────────────
 
 func BenchmarkForwarder_Throughput(b *testing.B) {

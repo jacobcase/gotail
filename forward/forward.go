@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jacobcase/gotail/v2/tail"
@@ -144,6 +145,13 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 	// the wait for the next record. The buffer also lets the feeder read ahead
 	// while the consumer is blocked in a sink retry; see Options.PrefetchBuffer.
 	recCh := make(chan recItem, f.opts.PrefetchBuffer)
+	// feederDrained is set true iff the Source iterator finished naturally
+	// (no error yielded, no ctx-bail). It distinguishes the two paths that
+	// produce !ok on recCh in the consumer below: a clean drain (deliver the
+	// final batch) versus a ctx-cancellation bail (honor the cancellation).
+	// Without it, a custom RecordSource that drains cleanly while ctx is
+	// cancelled in the same instant could surface ctx.Err() instead of nil.
+	var feederDrained atomic.Bool
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -158,6 +166,7 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 				return
 			}
 		}
+		feederDrained.Store(true)
 	}()
 
 	var (
@@ -206,11 +215,14 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 
 		case item, ok := <-recCh:
 			if !ok {
-				// Goroutine exited: either ctx was cancelled or source was drained.
-				if ctx.Err() != nil {
-					return ctx.Err()
+				// Feeder exited. feederDrained tells us why: true means the
+				// Source iterator finished naturally (deliver the final batch),
+				// false means ctx-cancellation (honor it). Reading ctx.Err()
+				// alone is racy when both happen in the same instant.
+				if feederDrained.Load() {
+					return flush()
 				}
-				return flush()
+				return ctx.Err()
 			}
 			if item.err != nil {
 				if errors.Is(item.err, tail.ErrSourceExhausted) {
