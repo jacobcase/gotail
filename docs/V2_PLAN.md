@@ -1531,14 +1531,7 @@ fix issues the plan ignored; some pre-empt v2.1 items.
 6. **`OnBackoffSleep(d, attempt)`.** The plan signature is `func(d
    time.Duration)` (§4 L3 / §5.5); actual takes an additional `attempt int`.
    *Driver:* Pre-review (shipped before reviews).
-7. **`json.RawMessage` Meta-cap on save (`maxRawMetaBytes = 64 KiB`).**
-   The cap is implemented, matching plan §5.7 + Decision #6, but the plan
-   is silent on the asymmetry: the cap is enforced **only** on `Save`. A
-   larger meta blob written by an external editor or a future build will
-   `Load` without complaint.
-   *Driver:* Cap landed pre-review; [PERF_REVIEW §L4 (`maxRawMetaBytes`)](./reviews/PERF_REVIEW.md)
-   renamed the constant for clarity but did not move the check.
-8. **`OnTruncated` fires from two paths.** Plan §5.5 lists exactly one
+7. **`OnTruncated` fires from two paths.** Plan §5.5 lists exactly one
    trigger: “File size dropped below current position.” Actual code has
    two — the watcher-event path *and* a late-detection path inside
    `LineReader.Next` (the `fi.Size() < l.pos.Offset` block) for
@@ -1547,7 +1540,7 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    *Driver:* Pre-review (defensive coding for copytruncate races).
    PERF_REVIEW’s “File handling & rotation correctness” section confirms
    the double-defended copytruncate path.
-9. **Compressed-backup detection ships in v2.0.** Plan Decision #12 deferred
+8. **Compressed-backup detection ships in v2.0.** Plan Decision #12 deferred
    to v2.1. Actual code recognises `.gz` variants in both `Lumberjack` and
    `Logrotate` and surfaces them via the skip-hook (see point 2 above).
    *Driver:* [CODE_REVIEW §4](./reviews/CODE_REVIEW.md) — same finding as point 2.

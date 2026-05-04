@@ -198,6 +198,37 @@ func TestFileCursor_Load_RejectsFutureVersion(t *testing.T) {
 	}
 }
 
+// TestFileCursor_Load_RejectsOversizedMeta pins the symmetric application
+// of Decision #6 (64 KiB raw-meta cap). Save rejects oversized meta; Load
+// must too, so an externally-edited or future-build cursor file with a
+// larger meta blob does not silently load.
+func TestFileCursor_Load_RejectsOversizedMeta(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.cursor")
+
+	// Build a meta blob > 64 KiB (the cap is 64*1024). 70 KiB leaves headroom.
+	huge := strings.Repeat("a", 70*1024)
+	body := `{"pos":{"file":"/x","inode":"7","offset":"100"},"meta":"` + huge + `","version":1}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := tail.NewFileCursor(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, _, err = c.Load(ctx)
+	if err == nil {
+		t.Fatal("Load: expected error for oversized meta, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("Load: want size-exceeds error, got %v", err)
+	}
+}
+
 func TestFileCursor_Load_RejectsMissingVersion(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

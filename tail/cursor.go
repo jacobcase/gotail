@@ -238,6 +238,11 @@ func (c *FileCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
 	if err := json.Unmarshal(data, &cf); err != nil {
 		return Checkpoint{}, false, fmt.Errorf("tail: parse cursor %s: %w", c.path, err)
 	}
+	if len(cf.Meta) > maxRawMetaBytes {
+		return Checkpoint{}, false, fmt.Errorf(
+			"tail: cursor %s meta size %d exceeds %d-byte limit",
+			c.path, len(cf.Meta), maxRawMetaBytes)
+	}
 	if cf.Version != cursorVersion {
 		if c.opts.migrate == nil {
 			return Checkpoint{}, false, fmt.Errorf(
