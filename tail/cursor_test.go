@@ -236,6 +236,10 @@ func TestFileCursor_Flock_PIDInFile(t *testing.T) {
 	testFlockPIDInFile(t)
 }
 
+func TestFileCursor_Flock_CrossProcess(t *testing.T) {
+	testFlockCrossProcess(t)
+}
+
 func FuzzCursorParse(f *testing.F) {
 	f.Add([]byte(`{"pos":{"file":"a","inode":"1","offset":"0"},"version":1}`))
 	f.Add([]byte(`{}`))

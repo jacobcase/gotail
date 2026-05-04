@@ -52,6 +52,10 @@ func testFlockReleasedOnClose(t *testing.T) {
 	c2.Close()
 }
 
+func testFlockCrossProcess(t *testing.T) {
+	t.Skip("cross-process flock test not yet ported to Windows (LockFileEx semantics differ from POSIX flock)")
+}
+
 func testFlockPIDInFile(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
