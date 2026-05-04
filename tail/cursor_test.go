@@ -240,6 +240,130 @@ func TestFileCursor_Flock_CrossProcess(t *testing.T) {
 	testFlockCrossProcess(t)
 }
 
+// ── Phase C: WithCursorMigration ─────────────────────────────────────────────
+
+func TestFileCursor_WithCursorMigration_FromV0(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v0.cursor")
+
+	// Write a v0 cursor by hand (no version field → unmarshal sets Version=0).
+	// Use the same pos JSON shape but omit the version field.
+	v0body := `{"pos":{"file":"/var/log/app.log","inode":"42","offset":"512"}}`
+	if err := os.WriteFile(path, []byte(v0body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	wantPos := watch.Position{File: "/var/log/app.log", Inode: 42, Offset: 512}
+
+	migrator := func(version int, raw []byte) (tail.Checkpoint, error) {
+		if version != 0 {
+			t.Errorf("migrator: want version 0, got %d", version)
+		}
+		// The v0 format already has a pos field with the right shape.
+		// Parse it manually.
+		type v0cursor struct {
+			Pos watch.Position `json:"pos"`
+		}
+		var v0 v0cursor
+		if err := json.Unmarshal(raw, &v0); err != nil {
+			return tail.Checkpoint{}, err
+		}
+		return tail.Checkpoint{Pos: v0.Pos}, nil
+	}
+
+	c, err := tail.NewFileCursor(path, tail.WithCursorMigration(migrator))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	got, found, err := c.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("Load: expected found=true after migration")
+	}
+	if got.Pos != wantPos {
+		t.Fatalf("pos mismatch: want %+v, got %+v", wantPos, got.Pos)
+	}
+
+	// Verify the on-disk file was upgraded to version 1.
+	got2, found2, err := c.Load(ctx)
+	if err != nil || !found2 {
+		t.Fatalf("second Load: found=%v err=%v", found2, err)
+	}
+	if got2.Pos != wantPos {
+		t.Fatalf("second Load pos mismatch: want %+v, got %+v", wantPos, got2.Pos)
+	}
+}
+
+func TestFileCursor_WithCursorMigration_NotConfigured(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v0_nomig.cursor")
+
+	v0body := `{"pos":{"file":"/x","inode":"1","offset":"0"}}`
+	if err := os.WriteFile(path, []byte(v0body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := tail.NewFileCursor(path) // no WithCursorMigration
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, _, err = c.Load(ctx)
+	if err == nil {
+		t.Fatal("Load: expected error for unsupported version, got nil")
+	}
+	if !errors.Is(err, tail.ErrUnsupportedCursorVersion) {
+		t.Fatalf("Load: want ErrUnsupportedCursorVersion, got %v", err)
+	}
+}
+
+func TestFileCursor_WithCursorMigration_ErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v0_migerr.cursor")
+
+	v0body := `{"pos":{"file":"/x","inode":"1","offset":"0"}}`
+	originalContent := []byte(v0body)
+	if err := os.WriteFile(path, originalContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	migErr := errors.New("migrator: cannot handle this version")
+	migrator := func(_ int, _ []byte) (tail.Checkpoint, error) {
+		return tail.Checkpoint{}, migErr
+	}
+
+	c, err := tail.NewFileCursor(path, tail.WithCursorMigration(migrator))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, _, err = c.Load(ctx)
+	if err == nil {
+		t.Fatal("Load: expected error, got nil")
+	}
+	if !errors.Is(err, tail.ErrUnsupportedCursorVersion) {
+		t.Fatalf("Load: want ErrUnsupportedCursorVersion in chain, got %v", err)
+	}
+
+	// File must be unchanged after a failed migration.
+	diskContent, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("ReadFile: %v", rerr)
+	}
+	if string(diskContent) != string(originalContent) {
+		t.Fatalf("file was modified despite migration failure: got %q", diskContent)
+	}
+}
+
 func FuzzCursorParse(f *testing.F) {
 	f.Add([]byte(`{"pos":{"file":"a","inode":"1","offset":"0"},"version":1}`))
 	f.Add([]byte(`{}`))

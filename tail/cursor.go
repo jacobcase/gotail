@@ -39,6 +39,18 @@ type Checkpoint struct {
 	Meta json.RawMessage `json:"meta,omitempty"`
 }
 
+// CursorMigrator is the function type for on-load cursor migration.
+// It receives the on-disk version number and the raw file bytes, and
+// must return a migrated [Checkpoint] in the current schema.
+//
+// If the migrator returns an error, [FileCursor.Load] wraps it so that
+// [errors.Is](err, [ErrUnsupportedCursorVersion]) still holds — existing
+// callers' error branches remain unchanged.
+//
+// On success, Load writes the migrated checkpoint back to disk so that
+// subsequent loads bypass the migrator.
+type CursorMigrator func(version int, raw []byte) (Checkpoint, error)
+
 // FileCursorOption is a functional option for [NewFileCursor].
 type FileCursorOption func(*fileCursorOpts)
 
@@ -46,6 +58,7 @@ type fileCursorOpts struct {
 	dirSync   bool
 	fileMode  os.FileMode
 	flockPath string
+	migrate   CursorMigrator
 }
 
 // WithDirSync controls whether [FileCursor.Save] fsyncs the containing
@@ -66,6 +79,17 @@ func WithFileMode(mode os.FileMode) FileCursorOption {
 // the cursor file itself, because rename-over-open silently drops POSIX locks.
 func WithFlock(lockPath string) FileCursorOption {
 	return func(o *fileCursorOpts) { o.flockPath = lockPath }
+}
+
+// WithCursorMigration registers a [CursorMigrator] that [FileCursor.Load]
+// calls when the on-disk cursor file has an unsupported version (zero or
+// higher than the current schema). Without this option, Load returns
+// [ErrUnsupportedCursorVersion] on any version mismatch.
+//
+// On a successful migration Load rewrites the cursor file in the current
+// schema so that subsequent loads skip the migrator.
+func WithCursorMigration(fn CursorMigrator) FileCursorOption {
+	return func(o *fileCursorOpts) { o.migrate = fn }
 }
 
 // cursorFile is the on-disk JSON format.
@@ -109,7 +133,7 @@ func NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error) {
 	return c, nil
 }
 
-func (c *FileCursor) Load(_ context.Context) (Checkpoint, bool, error) {
+func (c *FileCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
 	data, err := os.ReadFile(c.path)
 	if os.IsNotExist(err) {
 		return Checkpoint{}, false, nil
@@ -122,9 +146,23 @@ func (c *FileCursor) Load(_ context.Context) (Checkpoint, bool, error) {
 		return Checkpoint{}, false, fmt.Errorf("tail: parse cursor %s: %w", c.path, err)
 	}
 	if cf.Version != cursorVersion {
-		return Checkpoint{}, false, fmt.Errorf(
-			"tail: cursor %s has version %d, this build expects %d: %w",
-			c.path, cf.Version, cursorVersion, ErrUnsupportedCursorVersion)
+		if c.opts.migrate == nil {
+			return Checkpoint{}, false, fmt.Errorf(
+				"tail: cursor %s has version %d, this build expects %d: %w",
+				c.path, cf.Version, cursorVersion, ErrUnsupportedCursorVersion)
+		}
+		// Call the user-supplied migrator.
+		migrated, merr := c.opts.migrate(cf.Version, data)
+		if merr != nil {
+			return Checkpoint{}, false, fmt.Errorf(
+				"tail: cursor %s migration from version %d failed: %w: %w",
+				c.path, cf.Version, merr, ErrUnsupportedCursorVersion)
+		}
+		// Persist the migrated checkpoint so subsequent loads skip the migrator.
+		if werr := c.Save(ctx, migrated); werr != nil {
+			return Checkpoint{}, false, fmt.Errorf("tail: cursor %s migration save: %w", c.path, werr)
+		}
+		return migrated, true, nil
 	}
 	return Checkpoint{Pos: cf.Pos, Meta: cf.Meta}, true, nil
 }
