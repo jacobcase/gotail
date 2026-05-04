@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/jacobcase/gotail/v2/internal/atomicwrite"
 )
@@ -21,6 +22,29 @@ const cursorVersion = 1
 // (written by a newer build). Callers can use [errors.Is] to detect it.
 var ErrUnsupportedCursorVersion = errors.New("tail: unsupported cursor version")
 
+// SyncMode controls when a [FileCursor] flushes buffered checkpoints to disk.
+type SyncMode int
+
+const (
+	// SyncAlways fsyncs on every [FileCursor.Save] call. This is the default
+	// and the safest mode: the cursor is never more than one Save behind disk.
+	SyncAlways SyncMode = iota
+	// SyncOnCommit buffers the latest checkpoint in memory; an explicit call to
+	// [Syncer.Sync] (type-asserted from the [Cursor] interface) flushes it.
+	// The Tailer's Commit calls only Save; the caller controls when Sync runs.
+	SyncOnCommit
+	// SyncBackground buffers the latest checkpoint in memory and flushes it in
+	// the background at most every [DefaultSyncBackgroundInterval]. The background
+	// goroutine starts in [NewFileCursor] and stops when [Cursor.Close] is called.
+	// Use [goleak] in tests to verify the goroutine terminates cleanly.
+	SyncBackground
+)
+
+// DefaultSyncBackgroundInterval is the flush interval used by [SyncBackground]
+// when no explicit interval is configured. Decision #23: 1 second matches the
+// default poll interval and bounds cursor staleness to one second.
+const DefaultSyncBackgroundInterval = time.Second
+
 // Cursor persists a [Checkpoint] (Position + opaque user metadata).
 type Cursor interface {
 	// Load returns the most-recently saved checkpoint. The bool is false when
@@ -30,6 +54,17 @@ type Cursor interface {
 	Save(ctx context.Context, c Checkpoint) error
 	// Close releases any resources held by the cursor (e.g. file locks).
 	Close() error
+}
+
+// Syncer is an extension interface optionally implemented by [Cursor] values.
+// [FileCursor] implements Syncer when configured with [SyncOnCommit] or
+// [SyncBackground]. [Tailer.Commit] calls only [Cursor.Save]; the caller
+// controls flushing by type-asserting to Syncer and calling Sync.
+type Syncer interface {
+	// Sync flushes any buffered checkpoint to disk. It is a no-op when no
+	// checkpoint is buffered (i.e. after construction or after the previous
+	// Sync consumed the buffer).
+	Sync(ctx context.Context) error
 }
 
 // Checkpoint is what gets persisted. Meta is opaque user data, stored as a
@@ -55,10 +90,12 @@ type CursorMigrator func(version int, raw []byte) (Checkpoint, error)
 type FileCursorOption func(*fileCursorOpts)
 
 type fileCursorOpts struct {
-	dirSync   bool
-	fileMode  os.FileMode
-	flockPath string
-	migrate   CursorMigrator
+	dirSync      bool
+	fileMode     os.FileMode
+	flockPath    string
+	migrate      CursorMigrator
+	syncMode     SyncMode
+	syncInterval time.Duration // used only by SyncBackground; 0 = DefaultSyncBackgroundInterval
 }
 
 // WithDirSync controls whether [FileCursor.Save] fsyncs the containing
@@ -92,6 +129,19 @@ func WithCursorMigration(fn CursorMigrator) FileCursorOption {
 	return func(o *fileCursorOpts) { o.migrate = fn }
 }
 
+// WithSyncMode sets the flush strategy for a [FileCursor].
+// Default is [SyncAlways]. See [SyncMode] for semantics.
+func WithSyncMode(m SyncMode) FileCursorOption {
+	return func(o *fileCursorOpts) { o.syncMode = m }
+}
+
+// WithSyncBackgroundInterval overrides the flush interval used by
+// [SyncBackground]. Zero or negative values use [DefaultSyncBackgroundInterval].
+// Ignored when the sync mode is not [SyncBackground].
+func WithSyncBackgroundInterval(d time.Duration) FileCursorOption {
+	return func(o *fileCursorOpts) { o.syncInterval = d }
+}
+
 // cursorFile is the on-disk JSON format.
 type cursorFile struct {
 	Pos     Position        `json:"pos"`
@@ -105,15 +155,31 @@ const maxRawMetaBytes = 64 * 1024
 
 // FileCursor atomically persists checkpoints to a JSON file using a
 // write-to-tmp + fsync + rename sequence.
+//
+// When configured with [SyncOnCommit] or [SyncBackground], FileCursor
+// implements the [Syncer] extension interface.
 type FileCursor struct {
 	path string
 	opts fileCursorOpts
 	lk   *flock // nil when WithFlock was not used or path was empty
+
+	// mu guards pending and dirty for SyncOnCommit / SyncBackground.
+	mu      sync.Mutex
+	pending Checkpoint
+	dirty   bool
+
+	// stopBg and bgDone are used only by SyncBackground.
+	stopBg chan struct{}
+	bgDone chan struct{}
 }
 
 // NewFileCursor opens (or creates) a cursor at path. The containing directory
 // must already exist. If [WithFlock] is provided with a non-empty lock path,
 // the lock is acquired before returning and held until [Cursor.Close].
+//
+// When [WithSyncMode]([SyncBackground]) is set, a background goroutine starts
+// that flushes the buffered checkpoint at [DefaultSyncBackgroundInterval].
+// The goroutine terminates when [Cursor.Close] is called.
 func NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error) {
 	o := fileCursorOpts{
 		dirSync:  true,
@@ -130,7 +196,34 @@ func NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error) {
 		}
 		c.lk = lk
 	}
+	if o.syncMode == SyncBackground {
+		interval := o.syncInterval
+		if interval <= 0 {
+			interval = DefaultSyncBackgroundInterval
+		}
+		c.stopBg = make(chan struct{})
+		c.bgDone = make(chan struct{})
+		go c.backgroundFlusher(interval)
+	}
 	return c, nil
+}
+
+// backgroundFlusher runs in a goroutine and flushes dirty checkpoints at
+// the configured interval. It exits when stopBg is closed.
+func (c *FileCursor) backgroundFlusher(interval time.Duration) {
+	defer close(c.bgDone)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			_ = c.Sync(context.Background())
+		case <-c.stopBg:
+			// Final flush before exit.
+			_ = c.Sync(context.Background())
+			return
+		}
+	}
 }
 
 func (c *FileCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
@@ -167,10 +260,26 @@ func (c *FileCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
 	return Checkpoint{Pos: cf.Pos, Meta: cf.Meta}, true, nil
 }
 
-func (c *FileCursor) Save(_ context.Context, cp Checkpoint) error {
+func (c *FileCursor) Save(ctx context.Context, cp Checkpoint) error {
 	if len(cp.Meta) > maxRawMetaBytes {
 		return fmt.Errorf("tail: raw meta size %d exceeds %d-byte limit", len(cp.Meta), maxRawMetaBytes)
 	}
+	switch c.opts.syncMode {
+	case SyncOnCommit, SyncBackground:
+		// Buffer; don't write to disk yet.
+		c.mu.Lock()
+		c.pending = cp
+		c.dirty = true
+		c.mu.Unlock()
+		return nil
+	default: // SyncAlways
+		return c.flush(cp)
+	}
+}
+
+// flush performs the actual atomic write to disk. Used by Save (SyncAlways)
+// and Sync (SyncOnCommit / SyncBackground).
+func (c *FileCursor) flush(cp Checkpoint) error {
 	data, err := json.Marshal(cursorFile{Pos: cp.Pos, Meta: cp.Meta, Version: cursorVersion})
 	if err != nil {
 		return fmt.Errorf("tail: marshal cursor: %w", err)
@@ -178,7 +287,27 @@ func (c *FileCursor) Save(_ context.Context, cp Checkpoint) error {
 	return atomicwrite.Write(c.path, data, c.opts.fileMode, c.opts.dirSync)
 }
 
+// Sync flushes the buffered checkpoint to disk. It is a no-op when the buffer
+// is not dirty or when the cursor is in [SyncAlways] mode (every Save already
+// fsyncs). Sync implements the [Syncer] extension interface.
+func (c *FileCursor) Sync(_ context.Context) error {
+	c.mu.Lock()
+	if !c.dirty {
+		c.mu.Unlock()
+		return nil
+	}
+	cp := c.pending
+	c.dirty = false
+	c.mu.Unlock()
+	return c.flush(cp)
+}
+
 func (c *FileCursor) Close() error {
+	// Stop the background flusher goroutine if running.
+	if c.stopBg != nil {
+		close(c.stopBg)
+		<-c.bgDone
+	}
 	if c.lk != nil {
 		return c.lk.release()
 	}

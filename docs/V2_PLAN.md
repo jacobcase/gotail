@@ -325,9 +325,10 @@ type FileCursorOption func(*fileCursorOpts)
 func NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error)
 func NewMemoryCursor() Cursor
 
-func WithDirSync(on bool) FileCursorOption           // default: on
-func WithFlock(lockPath string) FileCursorOption     // single-instance check; "" = no lock
-func WithSyncMode(m SyncMode) FileCursorOption       // Always | OnCommit | Background
+func WithDirSync(on bool) FileCursorOption                  // default: on
+func WithFlock(lockPath string) FileCursorOption             // single-instance check; "" = no lock
+func WithSyncMode(m SyncMode) FileCursorOption               // Always | OnCommit | Background
+func WithSyncBackgroundInterval(d time.Duration) FileCursorOption // SyncBackground flush interval; 0 = 1s (Decision #23)
 
 type SyncMode int
 const (
@@ -335,6 +336,15 @@ const (
     SyncOnCommit                 // Save buffers; explicit Sync() flushes
     SyncBackground               // background flusher; bounded staleness
 )
+
+// Syncer is an extension interface implemented by *FileCursor when
+// SyncOnCommit or SyncBackground is configured. The base Cursor interface
+// is not extended (Decision: use extension interface to keep the contract
+// intact for non-FileCursor implementations). Tailer.Commit calls Save only;
+// callers drive Sync themselves.
+type Syncer interface {
+    Sync(ctx context.Context) error
+}
 
 // Record carries one line plus its position.
 type Record struct {
@@ -1251,6 +1261,7 @@ All decisions below are locked in before implementation begins.
 | 20 | `forwardtest` and `watchtest` — same module or separate? | Same module, separate package | One repo, one go.mod. Test helpers don't pollute the main package's surface. |
 | 21 | `Position` type aliases collapse three layers' vocabularies — `forward.Position = tail.Position = watch.Position`. Keep or split per layer? | **Keep aliases.** | Position is the universal coordinate across all three layers; there is no value in re-shaping it per layer. The alias chain is a conscious decision, not an oversight. Documented so future reviewers don't try to "fix" it by introducing redundant types. Trade-off: a future shape change to `watch.Position` is a breaking change at L2 and L3 simultaneously — accepted. |
 | 22 | `internal/atomicwrite` reachable only inside the module — fine, or expose? | **Keep `internal/`** | Out-of-tree cursor backends (e.g., a future `cursor/redis` plugin) must re-implement the ~30 LOC tmp+fsync+rename helper. Acceptable cost in exchange for keeping atomicwrite as a private implementation detail we can refactor freely. Revisit if a third-party cursor ecosystem materializes. |
+| 23 | Default flush interval for `SyncBackground`? | **1 second** (`DefaultSyncBackgroundInterval`) | Matches the default poll interval (Decision #7); bounds cursor staleness to one second under normal operation. Exposed as a named constant so callers can reference it; overridable per-cursor via `WithSyncBackgroundInterval`. |
 
 ---
 
@@ -1413,7 +1424,6 @@ that explicitly rather than fabricating a review back-reference.
 
 | Plan reference | What the plan committed | What ships today | Driver |
 |---|---|---|---|
-| §4 L2, §5.3, Driving req 2c | `WithSyncMode(SyncMode)` cursor option with `SyncAlways`, `SyncOnCommit`, `SyncBackground` | Only the `SyncAlways` behaviour exists. `FileCursor.Save` is unconditionally synchronous. There is no `SyncMode` type, no `WithSyncMode` option. Driving requirement 2c (“cursor never lags by more than one syscall”) is met *only* in the always-fsync mode — there is no opt-down. | Pre-review (never implemented). [CODE_REVIEW Small Polish (`tail/cursor.go:38–42`)](./reviews/CODE_REVIEW.md) flagged the dead `SyncMode` enum values and recommended either implementing or removing them; not yet acted on. |
 | §4 L3 Options | `OnDropped func(droppedFiles int)` on `forward.Options` | Not implemented on `forward.Options`. The hook lives only on `tail.Options`. The Forwarder has no surface for files-dropped accounting. | Pre-review (never implemented). |
 | §4 L3 Options | `OnBatchSent func(records int, bytes int, latency time.Duration)` | Signature changed: `OnBatchSent func(n int, pos Position)`. **Both** `bytes` and `latency` were dropped from the hook payload; `pos` was added. Metrics consumers cannot derive batch-bytes or send latency from this hook. | Pre-review (shipped before reviews). |
 | §6 Strategy 2, §10 Phase 5 | `internal/bufpool` (`sync.Pool` for line copies) and pool-backed `Forwarder` batches | `internal/bufpool` exists but is unused; the `Forwarder` accumulates batches as `[]T`. Pooling discipline is the caller’s problem via `IdentityDecoderCopy` semantics. | [CODE_REVIEW §17](./reviews/CODE_REVIEW.md) — flagged `internal/bufpool` as dead code; recommended delete or wire-in. Not yet acted on. |
