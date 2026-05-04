@@ -3,6 +3,7 @@ package tailtest
 
 import (
 	"context"
+	"slices"
 	"sync"
 )
 
@@ -28,7 +29,7 @@ func (m *MemorySource) Prune(path string) {
 	defer m.mu.Unlock()
 	for i, p := range m.paths {
 		if p == path {
-			m.paths = append(m.paths[:i], m.paths[i+1:]...)
+			m.paths = slices.Delete(m.paths, i, i+1)
 			return
 		}
 	}
