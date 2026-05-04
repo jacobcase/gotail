@@ -184,7 +184,13 @@ func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) 
 		NoInodeCheck: t.opts.NoInodeCheck,
 		Logger:       lg,
 	}
-	w, err := watch.NewPolling(wc)
+	var w watch.Watcher
+	var err error
+	if t.opts.UseFsnotify {
+		w, err = watch.New(wc)
+	} else {
+		w, err = watch.NewPolling(wc)
+	}
 	if err != nil {
 		return fmt.Errorf("tail: open %s: %w", path, err)
 	}
