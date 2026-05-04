@@ -1,13 +1,13 @@
 # gotail v2 — Implementation Task List
 
-This is the executable task list for implementing v2 of gotail. Read [V2_PLAN.md](./V2_PLAN.md) for the full design rationale; this file is the actionable checklist.
+This is the executable task list for implementing v2 of gotail. Read [V2_PLAN.md](./docs/V2_PLAN.md) for the full design rationale; this file is the actionable checklist.
 
 **Working agreement for the implementing agent:**
 
 - Work phases in order. Each phase is an independently mergeable PR.
 - Within a phase, follow the sub-task order; later sub-tasks usually depend on earlier ones.
 - Every phase ends with all CI gates green: `go vet ./...`, `go test -race ./...`, `staticcheck ./...`, cross-compile to linux/amd64+arm64, darwin/arm64, windows/amd64, freebsd/amd64.
-- Section references like `§4` or `§5.3` point into V2_PLAN.md.
+- Section references like `§4` or `§5.3` point into [docs/V2_PLAN.md](./docs/V2_PLAN.md).
 - Section references like `tail.go:57` point into the v1 source files.
 - Every public type gets a doc comment. Every package gets a `doc.go`.
 - Use `slog` with consistent attribute keys: `path`, `inode`, `offset`, `attempt`, `err`, `latency_ms`.

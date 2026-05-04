@@ -1384,3 +1384,275 @@ Where each piece of v1 code maps to v2:
 | `line_reader_test.go:119-148` (`TestLineReaderRotate`) | `watch/linereader_test.go` (port) |
 
 Nothing from v1 is wasted. The race-aware rotation logic, the inode-equality identity model, the byte-accurate position tracking — all of it is preserved verbatim in semantics, just packaged better.
+
+---
+
+## 11. Deviations
+
+The shipped code is *not* a faithful execution of this plan. Several plan-level
+commitments were quietly dropped, several architectural pivots were taken on
+cleaner paths than the plan described, and several additions appeared that the
+plan never mentioned. This section tracks each delta and, where the deviation
+came out of a review, links to the review section that drove the change.
+
+**Source of truth:** §§3–6, 9 above vs. the v2 source tree as of the
+`v2-design-plan` branch on 2026-05-04. Reviews referenced live in
+[`./reviews/`](./reviews/):
+
+- [`CODE_REVIEW.md`](./reviews/CODE_REVIEW.md) — end-to-end code review
+  (2026-05-04).
+- [`PERF_REVIEW.md`](./reviews/PERF_REVIEW.md) — performance & simplicity
+  review (2026-05-04, closed).
+
+When updating the plan or shipping a new deviation, add the entry here and
+link to the review section that motivated it. Where a deviation predates the
+reviews (i.e. the plan was already wrong by the time reviewers looked), note
+that explicitly rather than fabricating a review back-reference.
+
+### 11.1 Plan promised → not shipped
+
+| Plan reference | What the plan committed | What ships today | Driver |
+|---|---|---|---|
+| §4 L2, §5.3, Driving req 2c | `WithSyncMode(SyncMode)` cursor option with `SyncAlways`, `SyncOnCommit`, `SyncBackground` | Only the `SyncAlways` behaviour exists. `FileCursor.Save` is unconditionally synchronous. There is no `SyncMode` type, no `WithSyncMode` option. Driving requirement 2c (“cursor never lags by more than one syscall”) is met *only* in the always-fsync mode — there is no opt-down. | Pre-review (never implemented). [CODE_REVIEW Small Polish (`tail/cursor.go:38–42`)](./reviews/CODE_REVIEW.md) flagged the dead `SyncMode` enum values and recommended either implementing or removing them; not yet acted on. |
+| §5.10 item 9 | `tail.WithCursorMigration(fn)` — migration hook fires on unknown on-disk version, user supplies migrated `Checkpoint` | Not implemented. `FileCursor.Load` returns `ErrUnsupportedCursorVersion` on any version mismatch (zero or > current). No migration seam exists; bumping `cursorVersion` is a hard cut. | Pre-review (never implemented). [CODE_REVIEW §20](./reviews/CODE_REVIEW.md) flagged the related gap (`Checkpoint.Version` was on the wire but not validated on `Load`); validation landed, the migration hook did not. |
+| §5.10 item 5 | `Tailer.Stats()` snapshot — atomic counters for bytes/lines/rotations/errors/position | Not implemented. Only `Position()` is exposed; observability is push-only via hooks. | Pre-review (never implemented). |
+| §5.10 item 4 | `Tailer.CloseWithFlush(ctx)` for callers wanting cursor-durability before exit | Not implemented. Only `Close()` exists, which discards uncommitted lines (per Decision #19). | Pre-review (never implemented). |
+| §5.10 item 2 | `tail.Options.SkipExisting bool` as a discoverable convenience for tail-from-end | Not implemented. The functional equivalent is `Whence: io.SeekEnd`, but the discoverable boolean does not exist. | Pre-review (never implemented). |
+| §4 L3 Options | `BackoffJitter float64 // 0..1, default 0.2` | Not implemented. `jitteredBackoff` always uses full jitter (`rand.Int64N(int64(ceiling))`); jitter cannot be tuned. | Pre-review (never implemented). |
+| §4 L3 Options | `OnDropped func(droppedFiles int)` on `forward.Options` | Not implemented on `forward.Options`. The hook lives only on `tail.Options`. The Forwarder has no surface for files-dropped accounting. | Pre-review (never implemented). |
+| §4 L3 Options | `OnBatchSent func(records int, bytes int, latency time.Duration)` | Signature changed: `OnBatchSent func(n int, pos Position)`. **Both** `bytes` and `latency` were dropped from the hook payload; `pos` was added. Metrics consumers cannot derive batch-bytes or send latency from this hook. | Pre-review (shipped before reviews). |
+| §6 Strategy 2, §10 Phase 5 | `internal/bufpool` (`sync.Pool` for line copies) and pool-backed `Forwarder` batches | `internal/bufpool` exists but is unused; the `Forwarder` accumulates batches as `[]T`. Pooling discipline is the caller’s problem via `IdentityDecoderCopy` semantics. | [CODE_REVIEW §17](./reviews/CODE_REVIEW.md) — flagged `internal/bufpool` as dead code; recommended delete or wire-in. Not yet acted on. |
+| §4 file layout | `watchtest/` subpackage for L1 helpers | Does not exist. `watch.FakeWatcher` lives in the `watch` package itself (the only L1 test helper). | Pre-review (never created). |
+| §3 ext, §5.2 | `tail.WithoutInodeCheck()` cursor option | Renamed to a flag on `tail.Options.NoInodeCheck bool`. Functionally close, but the option is on `Options`, not on `FileCursorOption`, because inode comparison happens in the watcher / `findFileByInode`, not inside the cursor. | Pre-review (design-time choice). |
+| Decision #4 | “Drop `golang.org/x/sys` dependency.” | Direct dep is dropped (`go.mod` shows it only `// indirect`), but it is still pulled in transitively by `fsnotify`. Spirit-of-the-plan compliance, not letter. | [PERF_REVIEW §H4](./reviews/PERF_REVIEW.md) tightened the stat path to a stdlib-only `statSizeInode` helper, eliminating the last in-tree x/sys touchpoints. The transitive pull from fsnotify remains. |
+
+### 11.2 Architectural pivots (the code took a different path than the plan’s words)
+
+These are **not** missing features — they are conscious deviations where the
+shipped design diverges from the plan’s described shape. Auditors who
+internalised the plan’s mental model first must remap.
+
+1. **`Event.PreRotation` is gone; trailing-bytes drain moved entirely into
+   `LineReader`.**
+   *Plan (§4 L1, §9 Decision #17):* `Event.PreRotation *PreRotation` carries
+   a bounded `io.Reader` exposing trailing bytes from the rotated-out file;
+   the `PreRotation` type is the *only* place an `io.Reader` crosses the
+   Watcher↔consumer port.
+   *Actual:* there is no `PreRotation` type, no `PreRotation` field on
+   `Event`. The single-fd model means the `LineReader` itself owns the only
+   fd and **continues reading the old fd until `io.EOF` after a `ReOpened`
+   event** — only then does it `os.Open` the new path
+   (`watch/linereader.go:194-207`, `:215-251`). The drain semantics are
+   preserved but the API surface that was supposed to expose them is
+   absent.
+   *Driver:* [PERF_REVIEW §H3 (single-fd architecture)](./reviews/PERF_REVIEW.md). The duplicate-fd
+   architecture and its race window were eliminated; `PreRotation` was
+   dropped from the public API in the same commit (`45e13fb`).
+
+2. **`RecordSource.Records` (iter form) → `RecordSource.Next` (pull form).**
+   *Plan (§4 L3):*
+   ```go
+   type RecordSource interface {
+       Records(ctx) iter.Seq2[tail.Record, error]
+       Commit(ctx, pos) error
+       Done() <-chan struct{}
+   }
+   ```
+   *Actual:*
+   ```go
+   type RecordSource interface {
+       Next(ctx) (Record, error)
+       Commit(ctx, pos) error
+       Done() <-chan struct{}
+   }
+   ```
+   `Forwarder.Run` calls `Source.Next` directly. The iterator form survives
+   only on `*tail.Tailer.Records`; the cross-package contract is pull-style.
+   *Driver:* [PERF_REVIEW §H1 (drop Forwarder feeder)](./reviews/PERF_REVIEW.md). The pull-style
+   `Next` plus per-call `context.WithDeadline` for `MaxBatchAge` lets
+   `Forwarder.Run` honour the age timer without a feeder goroutine,
+   buffered channel, or `recItem` wrapper.
+
+3. **Source exhaustion is detected by sentinel, not by `Done()`.**
+   *Plan (§4 L3):* “Run blocks until ctx canceled, Sink returns
+   ErrPermanent, or Source signals exhaustion via `Done()`. Returns nil on
+   normal exhaustion.”
+   *Actual:* `Forwarder.Run` matches `errors.Is(err, tail.ErrSourceExhausted)`
+   on the return value of `Source.Next` (`forward/forward.go:168`). The
+   `Done()` channel is required by the interface but **never read** by
+   `Run`. `Tailer` itself only ever closes `Done` in `StopAtEOF` mode; the
+   forwarder learns of exhaustion strictly from the Next-error channel.
+   *Driver:* [PERF_REVIEW §H1](./reviews/PERF_REVIEW.md) again — once the feeder goroutine went, the
+   only natural place to detect exhaustion was the per-call error from
+   `Source.Next`. [CODE_REVIEW §8 (forward feeder leak)](./reviews/CODE_REVIEW.md) was the
+   correctness driver for the same pivot in the original review pass.
+
+4. **`tail.New` takes a `ctx` parameter.**
+   *Plan (§4 L2):* `func New(opts Options) (*Tailer, error)`
+   *Actual:* `func New(ctx context.Context, opts Options) (*Tailer, error)`
+   The `ctx` governs only startup I/O (`Source.Enumerate`, `Cursor.Load`);
+   the runtime loop uses the per-call ctx of `Next`.
+   *Driver:* [CODE_REVIEW Small Polish (`tail/tail.go:121, 136`)](./reviews/CODE_REVIEW.md), which
+   pointed out that `New` did blocking I/O against `context.Background()`
+   and recommended a ctx parameter or `OpenContext` field.
+
+5. **Atomic-write step ordering.**
+   *Plan (§5.3):* Write tmp → fsync tmp → rename → optional dir-fsync →
+   close tmp. (Close after rename.)
+   *Actual:* Write → fsync → **close** → rename → optional dir-fsync. Closing
+   before rename is the conventional order.
+   *Driver:* [CODE_REVIEW §2 (atomicwrite.Write order)](./reviews/CODE_REVIEW.md). The plan’s
+   “close after rename” wording is now stale; PERF_REVIEW’s
+   “File handling & rotation correctness” section confirms the new order
+   as textbook-correct.
+
+### 11.3 Additions the plan never mentioned
+
+The shipped code includes capabilities that don’t appear in the plan. Some
+fix issues the plan ignored; some pre-empt v2.1 items.
+
+1. **`tail.Logrotate(activePath, ...opts)` source.** The plan only describes
+   `tail.Glob(active, backupGlob)` and explicitly calls out the lex-sort
+   bug for double-digit numeric suffixes. The shipped code adds a dedicated
+   `Logrotate` source with descending integer-`N` sort, a sibling-file-naming
+   convention, and its own functional-options pattern.
+   *Driver:* [CODE_REVIEW §5 (Glob lex-sort wrong for double-digit suffixes)](./reviews/CODE_REVIEW.md),
+   which recommended either rejecting `[0-9]*` patterns, adding a
+   comparator, or “offer a `tail.Logrotate` source that knows the
+   numeric-tail convention.” The third option was taken.
+2. **`WithLumberjackSkippedHook(fn)` and `WithLogrotateSkippedHook(fn)`.**
+   These callbacks fire synchronously from `Source.Enumerate` for every
+   compressed (`.gz`) backup the source recognises but cannot expose. Plan
+   Decision #12 deferred all .gz support to v2.1; the shipped code ships
+   *partial* support — detection + observability hook, but no decompression.
+   *Driver:* [CODE_REVIEW §4 (Lumberjack `.gz` rejected silently)](./reviews/CODE_REVIEW.md), which
+   recommended at minimum surfacing the skipped files via an
+   `OnSkippedBackup`-style hook.
+3. **`tail.StaticSource(paths)`.** Replaces the plan’s
+   `tail.MemorySource(paths)` (the immutable variant). The mutable variant
+   was correctly relegated to `tailtest.MemorySource{}`.
+   *Driver:* [PERF_REVIEW §L3 (`MemorySource` naming collision)](./reviews/PERF_REVIEW.md), which
+   recommended renaming the immutable variant to disambiguate from the
+   mutating test helper.
+4. **`watch.StatInode(path)` is exported.** Used by `tail.findFileByInode`.
+   The plan’s exported watch API list (§4) does not include it.
+   *Driver:* [PERF_REVIEW §H4 (Unix stat-only inode)](./reviews/PERF_REVIEW.md). The per-platform
+   `statSizeInode` helper landed alongside the export so the polling and
+   fsnotify watchers, plus `tail.findFileByInode`, could share a single
+   stat-only path on Unix.
+5. **`forward.WithSinkTimeout[T](d)` is generic.** Plan §5.10 item 7 sketches
+   it as a non-generic helper; actual is parameterised.
+   *Driver:* Pre-review (design-time choice — the helper has to wrap a
+   `Sink[T]`, so it inherits T).
+6. **`OnBackoffSleep(d, attempt)`.** The plan signature is `func(d
+   time.Duration)` (§4 L3 / §5.5); actual takes an additional `attempt int`.
+   *Driver:* Pre-review (shipped before reviews).
+7. **`json.RawMessage` Meta-cap on save (`maxRawMetaBytes = 64 KiB`).**
+   The cap is implemented, matching plan §5.7 + Decision #6, but the plan
+   is silent on the asymmetry: the cap is enforced **only** on `Save`. A
+   larger meta blob written by an external editor or a future build will
+   `Load` without complaint.
+   *Driver:* Cap landed pre-review; [PERF_REVIEW §L4 (`maxRawMetaBytes`)](./reviews/PERF_REVIEW.md)
+   renamed the constant for clarity but did not move the check.
+8. **`OnTruncated` fires from two paths.** Plan §5.5 lists exactly one
+   trigger: “File size dropped below current position.” Actual code has
+   two — the watcher-event path *and* a late-detection path inside
+   `LineReader.Next` (the `fi.Size() < l.pos.Offset` block) for
+   copytruncate races the watcher missed. A hook author following the plan
+   may not anticipate the second invocation site.
+   *Driver:* Pre-review (defensive coding for copytruncate races).
+   PERF_REVIEW’s “File handling & rotation correctness” section confirms
+   the double-defended copytruncate path.
+9. **Compressed-backup detection ships in v2.0.** Plan Decision #12 deferred
+   to v2.1. Actual code recognises `.gz` variants in both `Lumberjack` and
+   `Logrotate` and surfaces them via the skip-hook (see point 2 above).
+   *Driver:* [CODE_REVIEW §4](./reviews/CODE_REVIEW.md) — same finding as point 2.
+
+### 11.4 Subtle semantic deviations
+
+1. **`findFileByInode` with `noInodeCheck = true` returns the first
+   *existing* file’s index.** The plan describes `WithoutInodeCheck()` as
+   “disables the equality check entirely” without specifying tie-break
+   behaviour. The shipped semantics are: walk `files` in order, return
+   the first one for which `StatInode` succeeds. On a series with multiple
+   present files this lands resume at the *oldest still-present* file
+   regardless of which path the cursor named. Combined with the inode-0
+   ambiguity on Windows, this can mask a real rotation drift.
+   *Driver:* [CODE_REVIEW §1 (Windows inode is always 0)](./reviews/CODE_REVIEW.md) is the
+   foundational issue; the noInodeCheck tie-break behaviour predates the
+   review and remains the workaround until the Windows inode wiring is
+   fixed.
+2. **Whence one-shot uses an internal flag, not field mutation.**
+   `tail.openFile` clears `t.whenceUsed` rather than zeroing
+   `Options.Whence`. The plan didn’t specify either way, but the
+   never-mutate-Options choice is explicit.
+   *Driver:* [CODE_REVIEW §6 (`Tailer.openFile` mutates `t.opts.Whence`)](./reviews/CODE_REVIEW.md),
+   which recommended a private flag instead of mutating embedded options;
+   PERF_REVIEW’s goroutines/channels inventory likewise endorses the
+   private-flag style.
+3. **`Tailer.Position()` returns the most-recently-yielded record’s
+   position, not a “current logical position without consuming.”** Plan
+   §4 L2 wording suggests the latter. In practice these are the same value
+   between calls to `Next`, but a hook running mid-`Next` (e.g., `OnTruncated`)
+   sees a `Position()` that is *not* yet aligned with the truncation reset
+   — the assignment to `t.cur` happens after the line is yielded, not after
+   each Watcher event.
+   *Driver:* Pre-review (design-time choice; Position() reflects the
+   post-yield invariant the cursor commits against).
+4. **`Cursor.Load` ignores the `ctx` it receives.** The interface accepts
+   `ctx context.Context`; `FileCursor.Load` discards it (`func (c *FileCursor)
+   Load(_ context.Context) ...`). Same for `Save`. A long-running Redis or
+   SQL-backed `Cursor` written to the plan’s contract would be expected to
+   honour ctx; the in-tree implementation does not exercise it.
+   *Driver:* Pre-review (file I/O is fast and uncancellable in stdlib;
+   the interface keeps the seam for non-stdlib backends).
+5. **`Source.Enumerate` ignores the `ctx`.** Same pattern: every built-in
+   source (`SingleFile`, `StaticSource`, `Lumberjack`, `Logrotate`, `Glob`,
+   `tailtest.MemorySource`) discards the parameter (`func (...) Enumerate(_
+   context.Context) (...)`). A network-backed Source written to the contract
+   would honour ctx; the built-ins won’t.
+   *Driver:* Pre-review (same reasoning as cursor).
+6. **`ErrInodeMismatch` lives in `watch`, not `tail`.** Plan §3 ext-row
+   listed it as a tail-level sentinel. Actual: `watch.ErrInodeMismatch` is
+   defined but the production rotation path **does not return it** —
+   inode mismatch on resume is logged at warn-level and falls through to
+   offset 0 (`watch/poll.go:170-175`, `watch/fsnotify_unix.go:170-173`).
+   The sentinel is effectively unused by current code.
+   *Driver:* [CODE_REVIEW §7 (`pollWatcher.openFirst` does not handle Resume gracefully)](./reviews/CODE_REVIEW.md),
+   which recommended at minimum a Debug log and ideally surfacing
+   `ErrInodeMismatch` so callers can choose. The “surface as sentinel”
+   half is still pending.
+7. **`Forwarder` ignores its `RecordSource.Done()` channel.** The interface
+   requires it; `Forwarder.Run` does not select on it. Cleanup signalling
+   is exclusively via `ErrSourceExhausted`. Plan §4 L3 Run docstring
+   implies `Done()` is checked.
+   *Driver:* [PERF_REVIEW §H1](./reviews/PERF_REVIEW.md) (feeder removal made the channel
+   unreachable from the run loop) and [CODE_REVIEW §8 (forward feeder
+   leak)](./reviews/CODE_REVIEW.md) (the original correctness motivation for the rewrite).
+
+### 11.5 Plan-vs-shipped impact summary
+
+For an auditor or implementer reasoning from this plan, the highest-impact
+deltas are:
+
+- **`PreRotation` doesn’t exist**; the trailing-bytes invariant is
+  preserved by `LineReader` keeping the old fd open (§11.2 #1). Any
+  reasoning about rotation correctness must be against the LineReader
+  drain, not the plan’s `PreRotation.Reader`.
+- **No `WithSyncMode`**: all `FileCursor.Save` calls are synchronous fsync
+  (§11.1). A caller that relied on `SyncBackground` for throughput will not
+  find it.
+- **No `WithCursorMigration`** (§11.1): a future schema bump cannot land
+  without a hard cut.
+- **`forward.OnBatchSent` lost `bytes` and `latency`** (§11.1). Metrics
+  pipelines wired to the plan’s signature will not compile.
+- **`forward.RecordSource` is pull-style** (§11.2 #2): third-party
+  sources must implement `Next`, not `Records`.
+- **Forwarder exhaustion is sentinel-driven, not channel-driven** (§11.2
+  #3): a `RecordSource` whose `Done()` closes but whose `Next` keeps
+  returning records will *not* terminate `Run`.
+- **Compressed-backup behaviour is partial** (§11.3 #2, §11.3 #9):
+  detection-and-skip ships, decompression does not. A checkpoint pointing
+  at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy.
+- **`ErrInodeMismatch` is dead code in callers** (§11.4 #6). Reasoning
+  that asserts it is returned on resume mismatch is wrong.
