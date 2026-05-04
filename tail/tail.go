@@ -278,7 +278,11 @@ func (t *Tailer) advance(ctx context.Context) error {
 	}
 
 	if t.opts.OnRotated != nil {
-		t.opts.OnRotated(prev, Position{File: nextPath})
+		// Best-effort inode lookup: on failure the LineReader will surface
+		// the real error during the first read against the new file; firing
+		// the hook with inode=0 is no worse than leaving it unpopulated.
+		inode, _ := watch.StatInode(nextPath)
+		t.opts.OnRotated(prev, Position{File: nextPath, Inode: inode})
 	}
 	return nil
 }

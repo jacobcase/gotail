@@ -251,6 +251,11 @@ func (l *LineReader) switchToFile(path string, pos Position) error {
 }
 
 // trimLine strips a trailing \r and optionally appends \n.
+//
+// The append is in place: the read buffer already holds \n at raw[len(raw)]
+// (that's where bytes.IndexByte located it in Next). When \r is stripped first,
+// the \n overwrites it at raw[len(raw)-1]. Both fit within existing capacity,
+// so this stays zero-alloc — don't "simplify" by allocating a new slice.
 func (l *LineReader) trimLine(raw []byte) []byte {
 	if len(raw) > 0 && raw[len(raw)-1] == '\r' {
 		raw = raw[:len(raw)-1]

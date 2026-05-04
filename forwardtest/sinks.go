@@ -4,6 +4,7 @@ package forwardtest
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 
 	"github.com/jacobcase/gotail/v2/forward"
@@ -39,11 +40,7 @@ func (s *RecordingSink[T]) Batches() [][]T {
 func (s *RecordingSink[T]) All() []T {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []T
-	for _, b := range s.batches {
-		out = append(out, b...)
-	}
-	return out
+	return slices.Concat(s.batches...)
 }
 
 // FailingSink fails the first n Send calls with failWith (or a generic error
