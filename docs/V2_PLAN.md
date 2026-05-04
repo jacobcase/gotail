@@ -970,41 +970,21 @@ func (l *LineReader) Next(ctx context.Context) ([]byte, Position, error) {
 
 Buffer ownership rule: **the returned `[]byte` is valid until the next call to `Next` or `Close`.** Callers must copy if they retain. Document prominently. This matches `bufio.Scanner.Bytes()` semantics, which Go developers already know.
 
-#### Strategy 2: `sync.Pool` for transient line copies
+#### Strategy 2: `sync.Pool` for transient line copies — considered, dropped post-pivot
 
-The `forward.Forwarder` *does* need to retain lines across iterations (a batch accumulates). It must copy. To avoid GC pressure from `make([]byte, len)`, use a pool of pre-sized buffers:
+**Status: not implemented. See §11 for history.**
 
-```go
-package bufpool
+The plan originally proposed an `internal/bufpool` package (`sync.Pool` for line copies) wired into `Forwarder` batches. After the architectural pivot in §11.2 #2 (Records→Next, no feeder goroutine) the natural integration point was removed. `Forwarder[T]` is generic; a pool can only target `T = []byte`, and there is no clean type-generic seam for `bufpool.Put` after `Sink.Send`. Additionally, `IdentityDecoderCopy` users who care about allocations already have the `Decoder[T]` callback as their BYO pool seam.
 
-var pool = sync.Pool{
-    New: func() any { b := make([]byte, 0, 4096); return &b },
-}
+`BenchmarkForwarder_Throughput` without bufpool (2026-05-04, Apple M4 Pro):
 
-func Get() *[]byte                    { return pool.Get().(*[]byte) }
-func Put(b *[]byte) { *b = (*b)[:0]; pool.Put(b) }
+```
+BenchmarkForwarder_Throughput-14   6930673   177.0 ns/op   5649159 records/s   224 B/op   4 allocs/op
+BenchmarkForwarder_Throughput-14   6680863   177.7 ns/op   5626642 records/s   224 B/op   4 allocs/op
+BenchmarkForwarder_Throughput-14   6646902   178.4 ns/op   5604866 records/s   224 B/op   4 allocs/op
 ```
 
-Forwarder pseudocode:
-
-```go
-batch := make([]*[]byte, 0, opts.MaxBatchRecords)
-for line, pos, err := range tailer.Records(ctx) {
-    if err != nil { ... }
-    buf := bufpool.Get()
-    *buf = append(*buf, line...)
-    batch = append(batch, buf)
-    if shouldFlush(...) {
-        if err := opts.Sink.Send(ctx, deref(batch)); err == nil {
-            tailer.Commit(ctx, lastPos)
-            for _, b := range batch { bufpool.Put(b) }
-            batch = batch[:0]
-        }
-    }
-}
-```
-
-Sink sees `[][]byte`, batches are pool-backed. Net allocation: one slice header per batched line, pooled byte storage.
+~5.6M records/sec; 4 allocs/op on the hot path. Decision: accept these numbers rather than adding pool complexity. See §11.
 
 #### Strategy 3: Avoid `bufio.NewReader` reallocation on rotation
 
@@ -1426,7 +1406,6 @@ that explicitly rather than fabricating a review back-reference.
 |---|---|---|---|
 | §4 L3 Options | `OnDropped func(droppedFiles int)` on `forward.Options` | Not implemented on `forward.Options`. The hook lives only on `tail.Options`. The Forwarder has no surface for files-dropped accounting. | Pre-review (never implemented). |
 | §4 L3 Options | `OnBatchSent func(records int, bytes int, latency time.Duration)` | Signature changed: `OnBatchSent func(n int, pos Position)`. **Both** `bytes` and `latency` were dropped from the hook payload; `pos` was added. Metrics consumers cannot derive batch-bytes or send latency from this hook. | Pre-review (shipped before reviews). |
-| §6 Strategy 2, §10 Phase 5 | `internal/bufpool` (`sync.Pool` for line copies) and pool-backed `Forwarder` batches | `internal/bufpool` exists but is unused; the `Forwarder` accumulates batches as `[]T`. Pooling discipline is the caller’s problem via `IdentityDecoderCopy` semantics. | [CODE_REVIEW §17](./reviews/CODE_REVIEW.md) — flagged `internal/bufpool` as dead code; recommended delete or wire-in. Not yet acted on. |
 | §3 ext, §5.2 | `tail.WithoutInodeCheck()` cursor option | Renamed to a flag on `tail.Options.NoInodeCheck bool`. Functionally close, but the option is on `Options`, not on `FileCursorOption`, because inode comparison happens in the watcher / `findFileByInode`, not inside the cursor. | Pre-review (design-time choice). |
 | Decision #4 | “Drop `golang.org/x/sys` dependency.” | Direct dep is dropped (`go.mod` shows it only `// indirect`), but it is still pulled in transitively by `fsnotify`. Spirit-of-the-plan compliance, not letter. | [PERF_REVIEW §H4](./reviews/PERF_REVIEW.md) tightened the stat path to a stdlib-only `statSizeInode` helper, eliminating the last in-tree x/sys touchpoints. The transitive pull from fsnotify remains. |
 
