@@ -40,7 +40,7 @@ type Event struct {
 
 // Watcher emits events about file state transitions. Production
 // implementations stat the path; the consumer (LineReader) owns the only fd.
-// Tests can use [FakeWatcher].
+// Tests can use [watchtest.FakeWatcher].
 type Watcher interface {
 	Wait(ctx context.Context) (Event, error)
 	Close() error

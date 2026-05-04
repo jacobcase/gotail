@@ -1,4 +1,4 @@
-package watch_test
+package watchtest_test
 
 import (
 	"context"
@@ -7,11 +7,12 @@ import (
 	"testing"
 
 	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v2/watchtest"
 )
 
 func TestFakeWatcher_FirstWaitReturnsReOpened(t *testing.T) {
 	pos := watch.Position{File: "/var/log/x.log", Inode: 7, Offset: 42}
-	w := watch.FakeWatcher(pos.File, pos)
+	w := watchtest.FakeWatcher(pos.File, pos)
 	t.Cleanup(func() { w.Close() })
 
 	ev, err := w.Wait(context.Background())
@@ -30,7 +31,7 @@ func TestFakeWatcher_FirstWaitReturnsReOpened(t *testing.T) {
 }
 
 func TestFakeWatcher_SubsequentWaitReturnsEOF(t *testing.T) {
-	w := watch.FakeWatcher("/x", watch.Position{})
+	w := watchtest.FakeWatcher("/x", watch.Position{})
 	t.Cleanup(func() { w.Close() })
 
 	if _, err := w.Wait(context.Background()); err != nil {
@@ -43,7 +44,7 @@ func TestFakeWatcher_SubsequentWaitReturnsEOF(t *testing.T) {
 }
 
 func TestFakeWatcher_CancelledContext(t *testing.T) {
-	w := watch.FakeWatcher("/x", watch.Position{})
+	w := watchtest.FakeWatcher("/x", watch.Position{})
 	t.Cleanup(func() { w.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
