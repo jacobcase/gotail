@@ -3,12 +3,23 @@ package tail
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
 
 	"github.com/jacobcase/gotail/v2/internal/atomicwrite"
 )
+
+// cursorVersion is the schema version this build writes and the only version
+// it accepts on Load. Bumping requires migration support.
+const cursorVersion = 1
+
+// ErrUnsupportedCursorVersion is returned by [FileCursor.Load] when the
+// stored cursor file has a Version that this build does not understand —
+// either zero (corrupt or hand-edited) or higher than [cursorVersion]
+// (written by a newer build). Callers can use [errors.Is] to detect it.
+var ErrUnsupportedCursorVersion = errors.New("tail: unsupported cursor version")
 
 // Cursor persists a [Checkpoint] (Position + opaque user metadata).
 type Cursor interface {
@@ -131,6 +142,11 @@ func (c *FileCursor) Load(_ context.Context) (Checkpoint, bool, error) {
 	if err := json.Unmarshal(data, &cf); err != nil {
 		return Checkpoint{}, false, fmt.Errorf("tail: parse cursor %s: %w", c.path, err)
 	}
+	if cf.Version != cursorVersion {
+		return Checkpoint{}, false, fmt.Errorf(
+			"tail: cursor %s has version %d, this build expects %d: %w",
+			c.path, cf.Version, cursorVersion, ErrUnsupportedCursorVersion)
+	}
 	return Checkpoint{Pos: cf.Pos, Meta: cf.Meta}, true, nil
 }
 
@@ -138,7 +154,7 @@ func (c *FileCursor) Save(_ context.Context, cp Checkpoint) error {
 	if len(cp.Meta) > maxMetaBytes {
 		return fmt.Errorf("tail: meta size %d exceeds %d-byte limit", len(cp.Meta), maxMetaBytes)
 	}
-	data, err := json.Marshal(cursorFile{Pos: cp.Pos, Meta: cp.Meta, Version: 1})
+	data, err := json.Marshal(cursorFile{Pos: cp.Pos, Meta: cp.Meta, Version: cursorVersion})
 	if err != nil {
 		return fmt.Errorf("tail: marshal cursor: %w", err)
 	}

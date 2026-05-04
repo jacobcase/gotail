@@ -3,6 +3,7 @@ package tail_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,6 +165,60 @@ func TestFileCursor_OversizeMeta(t *testing.T) {
 	}
 	if err := c.Save(ctx, cp); err == nil {
 		t.Fatal("expected error for oversize meta, got nil")
+	}
+}
+
+// TestFileCursor_Load_RejectsFutureVersion pins the schema-version check.
+// A cursor file written with a version higher (or lower) than what this
+// build supports must be rejected with ErrUnsupportedCursorVersion so the
+// user sees the upgrade/migration condition instead of a silent stale read.
+func TestFileCursor_Load_RejectsFutureVersion(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "future.cursor")
+
+	// Hand-write a JSON file with version=99.
+	body := `{"pos":{"file":"/x","inode":"7","offset":"100"},"version":99}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := tail.NewFileCursor(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, _, err = c.Load(ctx)
+	if err == nil {
+		t.Fatal("Load: expected error for unsupported version, got nil")
+	}
+	if !errors.Is(err, tail.ErrUnsupportedCursorVersion) {
+		t.Fatalf("Load: want ErrUnsupportedCursorVersion in chain, got %v", err)
+	}
+}
+
+func TestFileCursor_Load_RejectsMissingVersion(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v0.cursor")
+
+	// Version field absent → unmarshal leaves it at 0, which is not the
+	// supported version. Catches corrupted/hand-edited files.
+	body := `{"pos":{"file":"/x","inode":"7","offset":"100"}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := tail.NewFileCursor(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, _, err = c.Load(ctx)
+	if !errors.Is(err, tail.ErrUnsupportedCursorVersion) {
+		t.Fatalf("Load: want ErrUnsupportedCursorVersion, got %v", err)
 	}
 }
 
