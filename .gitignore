@@ -16,3 +16,7 @@
 
 # Local Claude Code workspace config
 .claude/
+
+# Raw scanner output (reproducible; see review markdown for findings)
+docs/reviews/*/raw/
+docs/reviews/*/results/
