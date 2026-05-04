@@ -2,12 +2,14 @@ package tail_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/jacobcase/gotail/v2/tail"
+	"github.com/jacobcase/gotail/v2/tailtest"
 )
 
 func TestSingleFileSource(t *testing.T) {
@@ -322,5 +324,42 @@ func touch(t *testing.T, path string) {
 	t.Helper()
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSource_Enumerate_HonoursCanceledCtx pins the §3 ext "ctx on every
+// blocking call" requirement on every built-in Source. Each Enumerate must
+// return ctx.Err() when the caller has already canceled, instead of doing
+// the syscall.
+func TestSource_Enumerate_HonoursCanceledCtx(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "app.log")
+	touch(t, active)
+	touch(t, filepath.Join(dir, "app.log.1"))
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	mem := &tailtest.MemorySource{}
+	mem.Add(active)
+
+	cases := []struct {
+		name string
+		src  tail.Source
+	}{
+		{"SingleFile", tail.SingleFile(active)},
+		{"StaticSource", tail.StaticSource([]string{active})},
+		{"Lumberjack", tail.Lumberjack(active)},
+		{"Logrotate", tail.Logrotate(active)},
+		{"Glob", tail.Glob(active, filepath.Join(dir, "app.log.*"))},
+		{"MemorySource", mem},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.src.Enumerate(cancelled)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Enumerate: want context.Canceled, got %v", err)
+			}
+		})
 	}
 }

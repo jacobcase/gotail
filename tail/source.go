@@ -27,7 +27,10 @@ func SingleFile(path string) Source {
 
 type singleFileSource struct{ path string }
 
-func (s *singleFileSource) Enumerate(_ context.Context) ([]string, error) {
+func (s *singleFileSource) Enumerate(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return []string{s.path}, nil
 }
 
@@ -41,7 +44,10 @@ func StaticSource(paths []string) Source {
 
 type staticSource struct{ paths []string }
 
-func (s *staticSource) Enumerate(_ context.Context) ([]string, error) {
+func (s *staticSource) Enumerate(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return s.paths, nil
 }
 
@@ -85,7 +91,10 @@ type lumberjackSource struct {
 	skipped    func(path, reason string) // optional
 }
 
-func (s *lumberjackSource) Enumerate(_ context.Context) ([]string, error) {
+func (s *lumberjackSource) Enumerate(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	dir := filepath.Dir(s.activePath)
 	name := filepath.Base(s.activePath)
 	ext := filepath.Ext(name)
@@ -192,7 +201,10 @@ type globSource struct {
 	backupGlob string
 }
 
-func (g *globSource) Enumerate(_ context.Context) ([]string, error) {
+func (g *globSource) Enumerate(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	matches, err := filepath.Glob(g.backupGlob)
 	if err != nil {
 		return nil, fmt.Errorf("tail: glob %q: %w", g.backupGlob, err)
@@ -238,7 +250,10 @@ type logrotateSource struct {
 	skipped    func(path, reason string) // optional
 }
 
-func (s *logrotateSource) Enumerate(_ context.Context) ([]string, error) {
+func (s *logrotateSource) Enumerate(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	matches, err := filepath.Glob(s.activePath + ".*")
 	if err != nil {
 		return nil, fmt.Errorf("tail: logrotate glob: %w", err)

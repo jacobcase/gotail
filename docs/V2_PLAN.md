@@ -1576,20 +1576,7 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    each Watcher event.
    *Driver:* Pre-review (design-time choice; Position() reflects the
    post-yield invariant the cursor commits against).
-4. **`Cursor.Load` ignores the `ctx` it receives.** The interface accepts
-   `ctx context.Context`; `FileCursor.Load` discards it (`func (c *FileCursor)
-   Load(_ context.Context) ...`). Same for `Save`. A long-running Redis or
-   SQL-backed `Cursor` written to the plan’s contract would be expected to
-   honour ctx; the in-tree implementation does not exercise it.
-   *Driver:* Pre-review (file I/O is fast and uncancellable in stdlib;
-   the interface keeps the seam for non-stdlib backends).
-5. **`Source.Enumerate` ignores the `ctx`.** Same pattern: every built-in
-   source (`SingleFile`, `StaticSource`, `Lumberjack`, `Logrotate`, `Glob`,
-   `tailtest.MemorySource`) discards the parameter (`func (...) Enumerate(_
-   context.Context) (...)`). A network-backed Source written to the contract
-   would honour ctx; the built-ins won’t.
-   *Driver:* Pre-review (same reasoning as cursor).
-6. **`ErrInodeMismatch` lives in `watch`, not `tail`.** Plan §3 ext-row
+4. **`ErrInodeMismatch` lives in `watch`, not `tail`.** Plan §3 ext-row
    listed it as a tail-level sentinel. Actual: `watch.ErrInodeMismatch` is
    defined but the production rotation path **does not return it** —
    inode mismatch on resume is logged at warn-level and falls through to
@@ -1599,7 +1586,7 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    which recommended at minimum a Debug log and ideally surfacing
    `ErrInodeMismatch` so callers can choose. The “surface as sentinel”
    half is still pending.
-7. **`Forwarder` ignores its `RecordSource.Done()` channel.** The interface
+5. **`Forwarder` ignores its `RecordSource.Done()` channel.** The interface
    requires it; `Forwarder.Run` does not select on it. Cleanup signalling
    is exclusively via `ErrSourceExhausted`. Plan §4 L3 Run docstring
    implies `Done()` is checked.

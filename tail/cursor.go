@@ -227,6 +227,9 @@ func (c *FileCursor) backgroundFlusher(interval time.Duration) {
 }
 
 func (c *FileCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return Checkpoint{}, false, err
+	}
 	data, err := os.ReadFile(c.path)
 	if os.IsNotExist(err) {
 		return Checkpoint{}, false, nil
@@ -266,6 +269,9 @@ func (c *FileCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
 }
 
 func (c *FileCursor) Save(ctx context.Context, cp Checkpoint) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(cp.Meta) > maxRawMetaBytes {
 		return fmt.Errorf("tail: raw meta size %d exceeds %d-byte limit", len(cp.Meta), maxRawMetaBytes)
 	}
@@ -295,7 +301,10 @@ func (c *FileCursor) flush(cp Checkpoint) error {
 // Sync flushes the buffered checkpoint to disk. It is a no-op when the buffer
 // is not dirty or when the cursor is in [SyncAlways] mode (every Save already
 // fsyncs). Sync implements the [Syncer] extension interface.
-func (c *FileCursor) Sync(_ context.Context) error {
+func (c *FileCursor) Sync(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	if !c.dirty {
 		c.mu.Unlock()
@@ -331,13 +340,19 @@ func NewMemoryCursor() Cursor {
 	return &memoryCursor{}
 }
 
-func (m *memoryCursor) Load(_ context.Context) (Checkpoint, bool, error) {
+func (m *memoryCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return Checkpoint{}, false, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cp, m.have, nil
 }
 
-func (m *memoryCursor) Save(_ context.Context, cp Checkpoint) error {
+func (m *memoryCursor) Save(ctx context.Context, cp Checkpoint) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cp = cp

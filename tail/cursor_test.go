@@ -198,6 +198,42 @@ func TestFileCursor_Load_RejectsFutureVersion(t *testing.T) {
 	}
 }
 
+// TestFileCursor_Load_HonoursCanceledCtx and the matching Save test pin the
+// §3 ext "ctx on every blocking call" requirement: the in-tree cursor
+// implementations must check ctx at entry, so plugin authors copying these
+// as references see the correct pattern.
+func TestFileCursor_Load_HonoursCanceledCtx(t *testing.T) {
+	c, _ := newFileCursor(t)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := c.Load(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Load: want context.Canceled, got %v", err)
+	}
+}
+
+func TestFileCursor_Save_HonoursCanceledCtx(t *testing.T) {
+	c, _ := newFileCursor(t)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	cp := tail.Checkpoint{Pos: watch.Position{File: "/x", Inode: 1, Offset: 0}}
+	if err := c.Save(cancelled, cp); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Save: want context.Canceled, got %v", err)
+	}
+}
+
+func TestMemoryCursor_HonoursCanceledCtx(t *testing.T) {
+	c := tail.NewMemoryCursor()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := c.Load(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Load: want context.Canceled, got %v", err)
+	}
+	cp := tail.Checkpoint{Pos: watch.Position{File: "/x", Inode: 1, Offset: 0}}
+	if err := c.Save(cancelled, cp); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Save: want context.Canceled, got %v", err)
+	}
+}
+
 // TestFileCursor_Load_RejectsOversizedMeta pins the symmetric application
 // of Decision #6 (64 KiB raw-meta cap). Save rejects oversized meta; Load
 // must too, so an externally-edited or future-build cursor file with a

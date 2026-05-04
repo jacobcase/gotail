@@ -36,7 +36,10 @@ func (m *MemorySource) Prune(path string) {
 }
 
 // Enumerate returns a snapshot of the current file list.
-func (m *MemorySource) Enumerate(_ context.Context) ([]string, error) {
+func (m *MemorySource) Enumerate(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cp := make([]string, len(m.paths))
