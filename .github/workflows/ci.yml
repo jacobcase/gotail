@@ -7,12 +7,13 @@ on:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, tags=${{ matrix.tags }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        tags: ["", "gotail_nofsnotify"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -20,10 +21,10 @@ jobs:
           go-version: "1.26"
 
       - name: go vet
-        run: go vet ./...
+        run: go vet -tags "${{ matrix.tags }}" ./...
 
       - name: go test -race
-        run: go test -race ./...
+        run: go test -race -tags "${{ matrix.tags }}" ./...
 
   cross-compile:
     name: cross-compile

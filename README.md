@@ -151,6 +151,20 @@ gotail -start /var/log/app.log       # tail from beginning
 gotail -stop /var/log/app.log        # drain to EOF and exit
 ```
 
+## Development
+
+The library is concurrency-heavy. Always verify changes under the race
+detector, and exercise both build configurations so the fsnotify and
+polling-only paths stay green:
+
+```
+go test -race ./...
+go test -race -tags gotail_nofsnotify ./...
+```
+
+CI runs both matrices on Linux, macOS, and Windows; goroutine leaks are
+caught at suite teardown via [goleak](https://github.com/uber-go/goleak).
+
 ## Docs
 
 - [Metrics: Prometheus](docs/metrics-prometheus.md)
