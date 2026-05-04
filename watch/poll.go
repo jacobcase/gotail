@@ -176,7 +176,8 @@ func (p *pollWatcher) openFirst() (*Event, error) {
 	if p.c.Resume != nil && !p.c.Resume.IsZero() {
 		r := p.c.Resume
 		p.c.Resume = nil // one-shot
-		if p.c.NoInodeCheck || r.Inode == inode {
+		switch {
+		case p.c.NoInodeCheck || r.Inode == inode:
 			if r.Offset <= fi.Size() {
 				seekPos, err = f.Seek(r.Offset, io.SeekStart)
 				if err != nil {
@@ -184,6 +185,13 @@ func (p *pollWatcher) openFirst() (*Event, error) {
 					return nil, fmt.Errorf("watch: seek to resume point: %w", err)
 				}
 			}
+		default:
+			// Resume cursor's inode does not match the file currently at Path.
+			// This typically means the checkpointed file has rotated away;
+			// continue from offset 0 of the new file rather than failing,
+			// but log so the dropped resume is not silent.
+			p.logger.Warn("watch: resume point inode mismatch — restarting at offset 0",
+				"path", p.c.Path, "want_inode", r.Inode, "got_inode", inode)
 		}
 	} else if p.c.Whence != io.SeekStart {
 		seekPos, err = f.Seek(0, p.c.Whence)

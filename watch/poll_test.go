@@ -1,10 +1,13 @@
 package watch_test
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -380,14 +383,23 @@ func TestRotation_NewFileStartsAtZero(t *testing.T) {
 	writeFile(t, path, "initial\n")
 
 	// Resume from a non-zero position so that the watcher opens with seek.
-	resume := watch.Position{File: path, Offset: 4} // mid-line
+	// Use the real inode so Resume is honored (a mismatched inode would be
+	// dropped with a Warn log, which is a different code path).
+	inode, err := watch.StatInode(path)
+	if err != nil {
+		t.Fatalf("StatInode: %v", err)
+	}
+	resume := watch.Position{File: path, Inode: inode, Offset: 4} // mid-line
 	c := watch.Config{Path: path, Interval: 10 * time.Millisecond, Resume: &resume}
 	w := mustNewPolling(t, c)
 
-	// Open event — position is 4 (resumed).
+	// Open event — Resume honored, offset is 4.
 	ev := waitEvent(t, ctx, w)
 	if !ev.ReOpened {
 		t.Fatal("expected ReOpened")
+	}
+	if ev.Pos.Offset != 4 {
+		t.Fatalf("Resume not honored: want offset 4, got %d", ev.Pos.Offset)
 	}
 
 	// Rotate to a new file.
@@ -405,5 +417,45 @@ func TestRotation_NewFileStartsAtZero(t *testing.T) {
 	// The ReOpened event for the new file must have offset 0.
 	if ev.Pos.Offset != 0 {
 		t.Fatalf("new file after rotation must start at offset 0, got %d", ev.Pos.Offset)
+	}
+}
+
+// TestPollWatcher_ResumeInodeMismatch_Warns pins the contract that a Resume
+// whose inode does not match the on-disk file is dropped (offset reset to 0)
+// AND surfaced as a Warn log so the data-loss-adjacent fallback is visible.
+func TestPollWatcher_ResumeInodeMismatch_Warns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mismatch.log")
+	writeFile(t, path, "hello\n")
+
+	var logBuf bytes.Buffer
+	lg := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	resume := watch.Position{File: path, Inode: 1, Offset: 3} // inode deliberately wrong
+	w, err := watch.NewPolling(watch.Config{
+		Path:     path,
+		Interval: 10 * time.Millisecond,
+		Resume:   &resume,
+		Logger:   lg,
+	})
+	if err != nil {
+		t.Fatalf("NewPolling: %v", err)
+	}
+	t.Cleanup(func() { w.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ev, err := w.Wait(ctx)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if !ev.ReOpened {
+		t.Fatalf("expected ReOpened, got %+v", ev)
+	}
+	if ev.Pos.Offset != 0 {
+		t.Fatalf("inode mismatch should reset offset to 0, got %d", ev.Pos.Offset)
+	}
+	if !strings.Contains(logBuf.String(), "resume point inode mismatch") {
+		t.Fatalf("expected inode-mismatch Warn log, got: %s", logBuf.String())
 	}
 }

@@ -168,7 +168,8 @@ func (w *fsnotifyWatcher) fsnOpenFirst() (*Event, error) {
 	if w.c.Resume != nil && !w.c.Resume.IsZero() {
 		r := w.c.Resume
 		w.c.Resume = nil
-		if w.c.NoInodeCheck || r.Inode == inode {
+		switch {
+		case w.c.NoInodeCheck || r.Inode == inode:
 			if r.Offset <= fi.Size() {
 				seekPos, err = f.Seek(r.Offset, io.SeekStart)
 				if err != nil {
@@ -176,6 +177,9 @@ func (w *fsnotifyWatcher) fsnOpenFirst() (*Event, error) {
 					return nil, fmt.Errorf("watch: seek to resume point: %w", err)
 				}
 			}
+		default:
+			w.logger.Warn("watch: resume point inode mismatch — restarting at offset 0",
+				"path", w.c.Path, "want_inode", r.Inode, "got_inode", inode)
 		}
 	} else if w.c.Whence != io.SeekStart {
 		seekPos, err = f.Seek(0, w.c.Whence)
