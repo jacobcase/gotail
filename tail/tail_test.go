@@ -21,7 +21,7 @@ func tailCfg(path string) tail.Options {
 
 func mustNew(t *testing.T, opts tail.Options) *tail.Tailer {
 	t.Helper()
-	tr, err := tail.New(opts)
+	tr, err := tail.New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("tail.New: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestTailer_MissingCheckpoint_Fail(t *testing.T) {
 	stalePos := tail.Position{File: path, Inode: 999999, Offset: 0}
 	_ = cur.Save(context.Background(), tail.Checkpoint{Pos: stalePos})
 
-	_, err := tail.New(tail.Options{
+	_, err := tail.New(context.Background(), tail.Options{
 		Source:              tail.SingleFile(path),
 		Cursor:              cur,
 		Interval:            10 * time.Millisecond,
@@ -278,7 +278,7 @@ func TestTailer_Close_Idempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tr, err := tail.New(tailCfg(path))
+	tr, err := tail.New(context.Background(), tailCfg(path))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -670,7 +670,6 @@ func BenchmarkCursor_Save_NoDirSync(b *testing.B) {
 	}
 }
 
-
 // ── Phase 4: Rotation hardening tests ──────────────────────────────────────
 
 func TestRotation_Copytruncate(t *testing.T) {
@@ -831,7 +830,7 @@ func TestProperty_AllBytesYieldedExactlyOnce(t *testing.T) {
 			Interval:  5 * time.Millisecond,
 			StopAtEOF: true,
 		}
-		tr, err := tail.New(opts)
+		tr, err := tail.New(ctx, opts)
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -887,7 +886,7 @@ func TestProperty_NoByteYieldedTwice(t *testing.T) {
 			Interval:  5 * time.Millisecond,
 			StopAtEOF: true,
 		}
-		tr1, _ := tail.New(opts1)
+		tr1, _ := tail.New(ctx, opts1)
 		var lastPos tail.Position
 		for i := 0; i < commit; i++ {
 			rec, err := tr1.Next(ctx)
@@ -908,7 +907,7 @@ func TestProperty_NoByteYieldedTwice(t *testing.T) {
 			Interval:  5 * time.Millisecond,
 			StopAtEOF: true,
 		}
-		tr2, _ := tail.New(opts2)
+		tr2, _ := tail.New(ctx, opts2)
 		var got int
 		for _, err := range tr2.Records(ctx) {
 			if err != nil {

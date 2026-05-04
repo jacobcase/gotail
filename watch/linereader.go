@@ -45,7 +45,7 @@ type LineReader struct {
 	w    Watcher
 	opts LineOptions
 
-	f   *os.File // own fd to the active (or draining) file
+	f   *os.File  // own fd to the active (or draining) file
 	src io.Reader // == f normally; may temporarily differ only after switchToFile
 
 	pos Position // logical position, updated after each line is emitted

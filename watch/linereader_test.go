@@ -202,8 +202,8 @@ func TestLineReader_Resume(t *testing.T) {
 	w1, _ := watch.NewPolling(c1)
 	lr1 := watch.NewLineReader(w1, watch.LineOptions{})
 
-	nextLine(t, ctx, lr1)          // line1
-	nextLine(t, ctx, lr1)          // line2
+	nextLine(t, ctx, lr1) // line1
+	nextLine(t, ctx, lr1) // line2
 	savedPos := lr1.Position()
 	lr1.Close()
 

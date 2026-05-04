@@ -21,6 +21,12 @@ type pollWatcher struct {
 	c      Config
 	logger *slog.Logger
 
+	// resume and whence hold the one-shot initial-open state copied from
+	// Config at construction. They are zeroed after the first openFirst
+	// consumes them, leaving Config untouched (callers may share a Config).
+	resume *Position
+	whence int
+
 	f       *os.File // currently watched file (nil until first open)
 	pos     int64    // last-emitted watermark; see doc above
 	inode   uint64
@@ -46,7 +52,7 @@ func NewPolling(c Config) (Watcher, error) {
 	if lg == nil {
 		lg = slog.Default()
 	}
-	return &pollWatcher{c: c, logger: lg}, nil
+	return &pollWatcher{c: c, logger: lg, resume: c.Resume, whence: c.Whence}, nil
 }
 
 // Wait blocks until there is a state change on the watched file, then returns
@@ -173,9 +179,9 @@ func (p *pollWatcher) openFirst() (*Event, error) {
 	inode := fileID(f)
 	var seekPos int64
 
-	if p.c.Resume != nil && !p.c.Resume.IsZero() {
-		r := p.c.Resume
-		p.c.Resume = nil // one-shot
+	if p.resume != nil && !p.resume.IsZero() {
+		r := p.resume
+		p.resume = nil // one-shot
 		switch {
 		case p.c.NoInodeCheck || r.Inode == inode:
 			if r.Offset <= fi.Size() {
@@ -193,13 +199,13 @@ func (p *pollWatcher) openFirst() (*Event, error) {
 			p.logger.Warn("watch: resume point inode mismatch — restarting at offset 0",
 				"path", p.c.Path, "want_inode", r.Inode, "got_inode", inode)
 		}
-	} else if p.c.Whence != io.SeekStart {
-		seekPos, err = f.Seek(0, p.c.Whence)
+	} else if p.whence != io.SeekStart {
+		seekPos, err = f.Seek(0, p.whence)
 		if err != nil {
 			f.Close()
 			return nil, fmt.Errorf("watch: initial seek: %w", err)
 		}
-		p.c.Whence = io.SeekStart
+		p.whence = io.SeekStart
 	}
 
 	p.f = f

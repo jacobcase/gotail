@@ -96,9 +96,9 @@ type Tailer struct {
 	atActive   bool // true when fileIdx == len(files)-1
 	whenceUsed bool // true after the initial seek (opts.Whence) has been applied
 
-	mu        sync.Mutex
-	cur       Position
-	lastMeta  json.RawMessage // preserved across plain Commit calls
+	mu       sync.Mutex
+	cur      Position
+	lastMeta json.RawMessage // preserved across plain Commit calls
 
 	done     chan struct{}
 	doneOnce sync.Once
@@ -115,10 +115,11 @@ type Tailer struct {
 
 // New constructs a Tailer. opts.Source must be non-nil.
 //
-// New calls Source.Enumerate and, if a Cursor is provided, Cursor.Load with
-// context.Background(). Long-running I/O during startup should be avoided
-// in custom Source and Cursor implementations.
-func New(opts Options) (*Tailer, error) {
+// New calls Source.Enumerate and, if a Cursor is provided, Cursor.Load using
+// the supplied ctx. The ctx governs only startup I/O; the Tailer's runtime
+// loop uses the per-call ctx passed to [Tailer.Next] and the internal close
+// signal from [Tailer.Close].
+func New(ctx context.Context, opts Options) (*Tailer, error) {
 	if opts.Source == nil {
 		return nil, errors.New("tail: Options.Source must not be nil")
 	}
@@ -129,8 +130,6 @@ func New(opts Options) (*Tailer, error) {
 	if lg == nil {
 		lg = slog.Default()
 	}
-
-	ctx := context.Background()
 
 	files, err := opts.Source.Enumerate(ctx)
 	if err != nil {
@@ -451,4 +450,3 @@ func (t *Tailer) Close() error {
 	})
 	return rerr
 }
-

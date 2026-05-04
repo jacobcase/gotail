@@ -25,6 +25,12 @@ type fsnotifyWatcher struct {
 	logger *slog.Logger
 	fw     *fsnotify.Watcher
 
+	// resume and whence hold the one-shot initial-open state copied from
+	// Config at construction. They are zeroed after the first open consumes
+	// them, leaving Config untouched (callers may share a Config).
+	resume *Position
+	whence int
+
 	f       *os.File
 	pos     int64
 	inode   uint64
@@ -57,7 +63,7 @@ func NewFsnotify(c Config) (Watcher, error) {
 		fw.Close()
 		return nil, fmt.Errorf("watch: watch dir %s: %w", dir, err)
 	}
-	return &fsnotifyWatcher{c: c, logger: lg, fw: fw}, nil
+	return &fsnotifyWatcher{c: c, logger: lg, fw: fw, resume: c.Resume, whence: c.Whence}, nil
 }
 
 // Wait mirrors pollWatcher.Wait but replaces the fixed-interval sleep with an
@@ -166,9 +172,9 @@ func (w *fsnotifyWatcher) fsnOpenFirst() (*Event, error) {
 	inode := fileID(f)
 	var seekPos int64
 
-	if w.c.Resume != nil && !w.c.Resume.IsZero() {
-		r := w.c.Resume
-		w.c.Resume = nil
+	if w.resume != nil && !w.resume.IsZero() {
+		r := w.resume
+		w.resume = nil
 		switch {
 		case w.c.NoInodeCheck || r.Inode == inode:
 			if r.Offset <= fi.Size() {
@@ -182,13 +188,13 @@ func (w *fsnotifyWatcher) fsnOpenFirst() (*Event, error) {
 			w.logger.Warn("watch: resume point inode mismatch — restarting at offset 0",
 				"path", w.c.Path, "want_inode", r.Inode, "got_inode", inode)
 		}
-	} else if w.c.Whence != io.SeekStart {
-		seekPos, err = f.Seek(0, w.c.Whence)
+	} else if w.whence != io.SeekStart {
+		seekPos, err = f.Seek(0, w.whence)
 		if err != nil {
 			f.Close()
 			return nil, fmt.Errorf("watch: initial seek: %w", err)
 		}
-		w.c.Whence = io.SeekStart
+		w.whence = io.SeekStart
 	}
 
 	w.f = f

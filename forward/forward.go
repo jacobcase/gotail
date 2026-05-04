@@ -170,11 +170,11 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 	}()
 
 	var (
-		batch       []T
-		batchBytes  int
+		batch        []T
+		batchBytes   int
 		batchLastPos Position
-		ageTimer    *time.Timer
-		ageTimerC   <-chan time.Time
+		ageTimer     *time.Timer
+		ageTimerC    <-chan time.Time
 	)
 
 	startAge := func() {

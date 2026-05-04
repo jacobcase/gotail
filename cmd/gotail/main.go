@@ -3,16 +3,16 @@
 //
 // Usage:
 //
-//	gotail [-n lines] [-end] <path>
+//	gotail [-start] [-stop] <path>
 //
 // Flags:
 //
-//	-n int    start from this many lines before EOF (default: tail from current end)
 //	-start    start from the beginning of the file instead of the end
 //	-stop     exit after reaching current EOF rather than following new data
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -50,15 +50,18 @@ func main() {
 		StopAtEOF: *stop,
 	}
 
-	tr, err := tail.New(opts)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	tr, err := tail.New(ctx, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gotail: %v\n", err)
 		os.Exit(1)
 	}
 	defer tr.Close()
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+	out := bufio.NewWriter(os.Stdout)
+	defer out.Flush()
 
 	for rec, err := range tr.Records(ctx) {
 		if err != nil {
@@ -68,7 +71,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "gotail: %v\n", err)
 			os.Exit(1)
 		}
-		os.Stdout.Write(rec.Line)
-		os.Stdout.Write([]byte{'\n'})
+		out.Write(rec.Line)
+		out.WriteByte('\n')
 	}
 }

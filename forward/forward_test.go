@@ -35,7 +35,7 @@ func mustNewForwarder[T any](t *testing.T, opts forward.Options[T]) *forward.For
 
 func mustNewTailer(t *testing.T, opts tail.Options) *tail.Tailer {
 	t.Helper()
-	tr, err := tail.New(opts)
+	tr, err := tail.New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("tail.New: %v", err)
 	}
@@ -128,10 +128,10 @@ func TestForwarder_BatchByBytes(t *testing.T) {
 
 	sink := &forwardtest.RecordingSink[[]byte]{}
 	fwd := mustNewForwarder(t, forward.Options[[]byte]{
-		Source:         tr,
-		Decoder:        forward.Decoder[[]byte](forward.IdentityDecoderCopy),
-		Sink:           sink,
-		MaxBatchBytes:  10, // 5+5 = 10 → flush on second record
+		Source:        tr,
+		Decoder:       forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:          sink,
+		MaxBatchBytes: 10, // 5+5 = 10 → flush on second record
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -168,10 +168,10 @@ func TestForwarder_BatchByAge(t *testing.T) {
 
 	sink := &forwardtest.RecordingSink[[]byte]{}
 	fwd := mustNewForwarder(t, forward.Options[[]byte]{
-		Source:       tr,
-		Decoder:      forward.Decoder[[]byte](forward.IdentityDecoderCopy),
-		Sink:         sink,
-		MaxBatchAge:  50 * time.Millisecond,
+		Source:          tr,
+		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:            sink,
+		MaxBatchAge:     50 * time.Millisecond,
 		MaxBatchRecords: 1000, // won't be reached
 	})
 
@@ -324,7 +324,9 @@ func TestForwarder_DecodeErrorSkips(t *testing.T) {
 		`{"id":6}`,
 	})
 
-	type Event struct{ ID int `json:"id"` }
+	type Event struct {
+		ID int `json:"id"`
+	}
 
 	tr := mustNewTailer(t, tail.Options{
 		Source:    tail.SingleFile(path),
@@ -723,7 +725,7 @@ func BenchmarkForwarder_Throughput(b *testing.B) {
 	}
 	f.Close()
 
-	tr, err := tail.New(tail.Options{
+	tr, err := tail.New(context.Background(), tail.Options{
 		Source:    tail.SingleFile(path),
 		Interval:  time.Millisecond,
 		StopAtEOF: true,

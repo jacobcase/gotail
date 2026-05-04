@@ -38,7 +38,7 @@ func acquireFlock(path string) (*flock, error) {
 	r, _, e := procLockFileEx.Call(
 		uintptr(h),
 		uintptr(lockfileExclusiveLock|lockfileFailImmediately),
-		0, // reserved
+		0,    // reserved
 		1, 0, // lock 1 byte at offset 0
 		uintptr(unsafe.Pointer(&ol)),
 	)

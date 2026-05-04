@@ -92,9 +92,9 @@ func TestLumberjackSource_NamingEdgeCases(t *testing.T) {
 	dir := t.TempDir()
 
 	tests := []struct {
-		active   string
-		extra    []string // files in same dir
-		wantLen  int      // total paths including active
+		active  string
+		extra   []string // files in same dir
+		wantLen int      // total paths including active
 	}{
 		{
 			// No extension active file.
@@ -143,11 +143,11 @@ func TestLumberjackSource_CompressedBackupsSkipped(t *testing.T) {
 	active := filepath.Join(dir, "events.log")
 
 	files := []string{
-		"events-2024-01-01T00-00-00.log",        // valid uncompressed backup
-		"events-2024-02-01T00-00-00.log.gz",     // compressed backup — skipped
-		"events-2024-02-15T00-00-00.log.gz",     // compressed backup — skipped
-		"events-not-a-timestamp.log.gz",         // not a lumberjack pattern; ignored silently
-		"events-2024-03-01T00-00-00.txt.gz",     // wrong ext; ignored silently
+		"events-2024-01-01T00-00-00.log",    // valid uncompressed backup
+		"events-2024-02-01T00-00-00.log.gz", // compressed backup — skipped
+		"events-2024-02-15T00-00-00.log.gz", // compressed backup — skipped
+		"events-not-a-timestamp.log.gz",     // not a lumberjack pattern; ignored silently
+		"events-2024-03-01T00-00-00.txt.gz", // wrong ext; ignored silently
 	}
 	for _, n := range files {
 		touch(t, filepath.Join(dir, n))

@@ -39,26 +39,11 @@ type Checkpoint struct {
 	Meta json.RawMessage `json:"meta,omitempty"`
 }
 
-// SyncMode controls fsync behaviour in [FileCursor].
-type SyncMode int
-
-const (
-	// SyncAlways fsyncs on every Save (default). Maximum durability.
-	SyncAlways SyncMode = iota
-	// SyncOnCommit buffers writes; an explicit Sync() call flushes to disk.
-	// Trades durability for throughput. (Not yet implemented; behaves like SyncAlways.)
-	SyncOnCommit
-	// SyncBackground flushes on a background timer.
-	// (Not yet implemented; behaves like SyncAlways.)
-	SyncBackground
-)
-
 // FileCursorOption is a functional option for [NewFileCursor].
 type FileCursorOption func(*fileCursorOpts)
 
 type fileCursorOpts struct {
 	dirSync   bool
-	syncMode  SyncMode
 	fileMode  os.FileMode
 	flockPath string
 }
@@ -68,13 +53,6 @@ type fileCursorOpts struct {
 // power-loss durability of the rename on ext4/xfs.
 func WithDirSync(on bool) FileCursorOption {
 	return func(o *fileCursorOpts) { o.dirSync = on }
-}
-
-// WithSyncMode sets the fsync strategy for [FileCursor.Save].
-// Default is [SyncAlways]. [SyncOnCommit] and [SyncBackground] are defined
-// for future use and currently behave like [SyncAlways].
-func WithSyncMode(m SyncMode) FileCursorOption {
-	return func(o *fileCursorOpts) { o.syncMode = m }
 }
 
 // WithFileMode sets the permission bits for the cursor file. Default 0o600.
@@ -113,7 +91,6 @@ type FileCursor struct {
 func NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error) {
 	o := fileCursorOpts{
 		dirSync:  true,
-		syncMode: SyncAlways,
 		fileMode: 0o600,
 	}
 	for _, fn := range opts {

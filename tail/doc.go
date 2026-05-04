@@ -52,7 +52,7 @@
 // # Usage
 //
 //	cur, _ := tail.NewFileCursor("/var/run/myapp.cursor")
-//	t, _ := tail.New(tail.Options{
+//	t, _ := tail.New(ctx, tail.Options{
 //	    Source: tail.SingleFile("/var/log/app.log"),
 //	    Cursor: cur,
 //	    Interval: time.Second,

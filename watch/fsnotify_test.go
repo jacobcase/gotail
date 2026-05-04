@@ -22,7 +22,7 @@ func TestFsnotify_BasicWriteDetect(t *testing.T) {
 	path := filepath.Join(dir, "test.log")
 
 	w, err := watch.NewFsnotify(watch.Config{
-		Path:     path,
+		Path:      path,
 		StopAtEOF: false,
 	})
 	if err != nil {
