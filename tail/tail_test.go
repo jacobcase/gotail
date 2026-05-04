@@ -3,6 +3,7 @@ package tail_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1169,3 +1170,271 @@ func TestTailer_SkipExisting_ConflictsWithWhence(t *testing.T) {
 		t.Fatal("want error for SkipExisting+Whence, got nil")
 	}
 }
+
+// ── Phase B: Stats ────────────────────────────────────────────────────────────
+
+func TestTailer_Stats_LineAndByteCounters(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stats.log")
+	// Three lines of known lengths: 3+1, 5+1, 4+1 = 15 bytes total.
+	if err := os.WriteFile(path, []byte("abc\nhello\ntest\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := tail.Options{
+		Source:    tail.SingleFile(path),
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	}
+	tr := mustNew(t, opts)
+
+	var got []tail.Record
+	for rec, err := range tr.Records(ctx) {
+		if err != nil {
+			break
+		}
+		got = append(got, rec)
+	}
+
+	if len(got) != 3 {
+		t.Fatalf("want 3 records, got %d", len(got))
+	}
+
+	s := tr.Stats()
+	if s.LinesYielded != 3 {
+		t.Fatalf("LinesYielded: want 3, got %d", s.LinesYielded)
+	}
+	// BytesRead = sum of (len(line)+1) for each line = 4+6+5 = 15.
+	if s.BytesRead != 15 {
+		t.Fatalf("BytesRead: want 15, got %d", s.BytesRead)
+	}
+}
+
+func TestTailer_Stats_Rotations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	active := filepath.Join(dir, "app.log")
+	backup := filepath.Join(dir, "app-2024-01-01T00-00-00.log")
+
+	os.WriteFile(backup, []byte("b1\n"), 0o644)
+	os.WriteFile(active, []byte("active\n"), 0o644)
+
+	inode1, _ := watchStatInode(backup)
+	cur := tail.NewMemoryCursor()
+	cur.Save(ctx, tail.Checkpoint{Pos: tail.Position{File: backup, Inode: inode1, Offset: 0}})
+
+	opts := tail.Options{
+		Source:    tail.Lumberjack(active),
+		Cursor:    cur,
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	}
+	tr := mustNew(t, opts)
+
+	for _, err := range tr.Records(ctx) {
+		if err != nil {
+			break
+		}
+	}
+
+	s := tr.Stats()
+	if s.Rotations != 1 {
+		t.Fatalf("want 1 rotation, got %d", s.Rotations)
+	}
+}
+
+func TestTailer_Stats_ConcurrentReads(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "conc.log")
+	var content []byte
+	for i := 0; i < 100; i++ {
+		content = append(content, []byte("line\n")...)
+	}
+	os.WriteFile(path, content, 0o644)
+
+	opts := tail.Options{
+		Source:    tail.SingleFile(path),
+		Interval:  5 * time.Millisecond,
+		StopAtEOF: true,
+	}
+	tr := mustNew(t, opts)
+
+	// Scrape stats from a side goroutine while Next runs.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			s := tr.Stats()
+			_ = s
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if s.LinesYielded >= 100 {
+				return
+			}
+		}
+	}()
+
+	for _, err := range tr.Records(ctx) {
+		if err != nil {
+			break
+		}
+	}
+	<-done
+}
+
+// ── Phase B: CloseWithFlush ───────────────────────────────────────────────────
+
+func TestTailer_CloseWithFlush_PersistsLastPos(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flush.log")
+	if err := os.WriteFile(path, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cur := tail.NewMemoryCursor()
+	opts := tail.Options{
+		Source:    tail.SingleFile(path),
+		Cursor:    cur,
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	}
+	tr, err := tail.New(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Read one record without committing.
+	rec := nextLine(t, ctx, tr)
+
+	// CloseWithFlush should persist the last-read position.
+	if err := tr.CloseWithFlush(ctx); err != nil {
+		t.Fatalf("CloseWithFlush: %v", err)
+	}
+
+	// Verify the cursor has the position.
+	cp, found, err := cur.Load(ctx)
+	if err != nil || !found {
+		t.Fatalf("Load: found=%v err=%v", found, err)
+	}
+	if cp.Pos != rec.Pos {
+		t.Fatalf("pos mismatch: want %+v, got %+v", rec.Pos, cp.Pos)
+	}
+}
+
+func TestTailer_Close_DoesNotPersist(t *testing.T) {
+	// Decision #19: Close alone leaves cursor empty for a yielded-but-uncommitted line.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no_persist.log")
+	if err := os.WriteFile(path, []byte("important\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cur := tail.NewMemoryCursor()
+	opts := tail.Options{
+		Source:    tail.SingleFile(path),
+		Cursor:    cur,
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	}
+	tr := mustNew(t, opts)
+
+	nextLine(t, ctx, tr)
+	tr.Close()
+
+	_, found, err := cur.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if found {
+		t.Fatal("Close() must not persist; want cursor empty after non-committed read")
+	}
+}
+
+func TestTailer_CloseWithFlush_NilCursor(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nocursor.log")
+	os.WriteFile(path, []byte("data\n"), 0o644)
+
+	opts := tail.Options{
+		Source:    tail.SingleFile(path),
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	}
+	tr, err := tail.New(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nextLine(t, ctx, tr)
+	if err := tr.CloseWithFlush(ctx); err != nil {
+		t.Fatalf("CloseWithFlush with nil cursor: %v", err)
+	}
+}
+
+func TestTailer_CloseWithFlush_CtxCanceled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ctxcancel.log")
+	os.WriteFile(path, []byte("data\n"), 0o644)
+
+	// Use a cursor that fails on Save.
+	failCursor := &failingSaveCursor{}
+
+	opts := tail.Options{
+		Source:    tail.SingleFile(path),
+		Cursor:    failCursor,
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	}
+	ctx := context.Background()
+	tr, err := tail.New(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Read one line (so t.cur is non-zero).
+	nextLine(t, context.Background(), tr)
+
+	// Cancel the ctx passed to CloseWithFlush — Save errors, but Close must
+	// still run and release the fd.
+	ctxCanceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	saveErr := tr.CloseWithFlush(ctxCanceled)
+	if saveErr == nil {
+		t.Fatal("want error from failing save, got nil")
+	}
+
+	// Double-close must be safe (no panic, no extra error).
+	_ = tr.Close()
+}
+
+// failingSaveCursor always returns an error from Save.
+type failingSaveCursor struct{}
+
+func (f *failingSaveCursor) Load(_ context.Context) (tail.Checkpoint, bool, error) {
+	return tail.Checkpoint{}, false, nil
+}
+func (f *failingSaveCursor) Save(_ context.Context, _ tail.Checkpoint) error {
+	return errors.New("save failed: test error")
+}
+func (f *failingSaveCursor) Close() error { return nil }

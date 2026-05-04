@@ -9,6 +9,7 @@ import (
 	"iter"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jacobcase/gotail/v2/watch"
@@ -89,6 +90,31 @@ type Options struct {
 	OnCheckpoint func(c Checkpoint)
 }
 
+// Stats is a point-in-time snapshot of counters maintained by a [Tailer].
+//
+// The snapshot is not transactionally consistent — each field is loaded via
+// an independent atomic read, so values may reflect different instants in time.
+// This matches the semantics of Prometheus scrapes and similar pull-style
+// metrics systems.
+//
+// Stats survives [Tailer.Close]: counters are preserved post-close so a final
+// scrape can record totals.
+type Stats struct {
+	BytesRead    int64
+	LinesYielded int64
+	Rotations    int64
+	Errors       int64
+	Position     Position
+}
+
+// tailerStats holds the atomic counters for a Tailer.
+type tailerStats struct {
+	bytesRead    atomic.Int64
+	linesYielded atomic.Int64
+	rotations    atomic.Int64
+	errors       atomic.Int64
+}
+
 // Tailer delivers lines from a file series with optional durable checkpointing.
 //
 // Tailer is not safe for concurrent use by multiple goroutines; however,
@@ -111,6 +137,8 @@ type Tailer struct {
 	mu       sync.Mutex
 	cur      Position
 	lastMeta json.RawMessage // preserved across plain Commit calls
+
+	stats tailerStats
 
 	done     chan struct{}
 	doneOnce sync.Once
@@ -289,6 +317,7 @@ func (t *Tailer) advance(ctx context.Context) error {
 		return err
 	}
 
+	t.stats.rotations.Add(1)
 	if t.opts.OnRotated != nil {
 		// Best-effort inode lookup: on failure the LineReader will surface
 		// the real error during the first read against the new file; firing
@@ -355,6 +384,7 @@ func (t *Tailer) Next(ctx context.Context) (Record, error) {
 				}
 				continue
 			}
+			t.stats.errors.Add(1)
 			if t.opts.OnError != nil {
 				t.opts.OnError(err)
 			}
@@ -364,6 +394,9 @@ func (t *Tailer) Next(ctx context.Context) (Record, error) {
 		t.mu.Lock()
 		t.cur = pos
 		t.mu.Unlock()
+
+		t.stats.linesYielded.Add(1)
+		t.stats.bytesRead.Add(int64(len(line)) + 1) // +1 for the newline
 
 		return Record{Line: line, Pos: pos}, nil
 	}
@@ -421,6 +454,72 @@ func (t *Tailer) Position() Position {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.cur
+}
+
+// Stats returns a snapshot of runtime counters. The snapshot is not
+// transactionally consistent across fields; each is loaded independently.
+// Safe to call from any goroutine, including after [Tailer.Close].
+func (t *Tailer) Stats() Stats {
+	return Stats{
+		BytesRead:    t.stats.bytesRead.Load(),
+		LinesYielded: t.stats.linesYielded.Load(),
+		Rotations:    t.stats.rotations.Load(),
+		Errors:       t.stats.errors.Load(),
+		Position:     t.Position(),
+	}
+}
+
+// CloseWithFlush saves the most-recently-yielded position as a Checkpoint
+// and then performs the normal [Tailer.Close] teardown. It is the explicit
+// opt-in to "commit the current position before closing"; [Tailer.Close]
+// alone discards uncommitted lines (Decision #19).
+//
+// If no Cursor was configured, CloseWithFlush degrades to Close.
+//
+// The ctx controls the Cursor.Save call. If ctx is cancelled, the save
+// is aborted (and the error returned), but the underlying Close still runs
+// to release file descriptors and locks.
+//
+// CloseWithFlush is idempotent: calling it (or Close) more than once is safe.
+//
+// The committed meta is the most-recently-committed meta; CloseWithFlush does
+// not invent new metadata.
+func (t *Tailer) CloseWithFlush(ctx context.Context) error {
+	var saveErr error
+	t.closeOnce.Do(func() {
+		t.closeCancel()
+		t.activeNext.Wait()
+
+		// Persist current position if a cursor is configured and we have a
+		// non-zero position to commit.
+		if t.opts.Cursor != nil {
+			t.mu.Lock()
+			pos := t.cur
+			meta := t.lastMeta
+			t.mu.Unlock()
+
+			if pos != (Position{}) {
+				cp := Checkpoint{Pos: pos, Meta: meta}
+				saveErr = t.opts.Cursor.Save(ctx, cp)
+				if saveErr == nil && t.opts.OnCheckpoint != nil {
+					t.opts.OnCheckpoint(cp)
+				}
+			}
+		}
+
+		// Always close the LineReader and Cursor regardless of Save error.
+		if t.lr != nil {
+			if err := t.lr.Close(); err != nil && saveErr == nil {
+				saveErr = err
+			}
+		}
+		if t.opts.Cursor != nil {
+			if err := t.opts.Cursor.Close(); err != nil && saveErr == nil {
+				saveErr = err
+			}
+		}
+	})
+	return saveErr
 }
 
 // Done is closed when the file series is fully exhausted in StopAtEOF mode —
