@@ -1,0 +1,76 @@
+# Metrics: OpenTelemetry
+
+Wire gotail hooks to OpenTelemetry counters. No gotail dependency on OTel —
+all wiring is in your application code.
+
+```go
+import (
+    "context"
+
+    "go.opentelemetry.io/otel"
+    "go.opentelemetry.io/otel/metric"
+    "github.com/jacobcase/gotail/v2/tail"
+    "github.com/jacobcase/gotail/v2/forward"
+)
+
+type Metrics struct {
+    linesProcessed metric.Int64Counter
+    rotations      metric.Int64Counter
+    truncations    metric.Int64Counter
+    batchesSent    metric.Int64Counter
+    sendErrors     metric.Int64Counter
+    decodeErrors   metric.Int64Counter
+}
+
+func NewMetrics() (*Metrics, error) {
+    meter := otel.Meter("gotail")
+    m := &Metrics{}
+    var err error
+
+    if m.linesProcessed, err = meter.Int64Counter("gotail.lines_processed",
+        metric.WithDescription("Total lines read")); err != nil {
+        return nil, err
+    }
+    if m.rotations, err = meter.Int64Counter("gotail.rotations",
+        metric.WithDescription("Log rotation events")); err != nil {
+        return nil, err
+    }
+    if m.truncations, err = meter.Int64Counter("gotail.truncations",
+        metric.WithDescription("Truncation events")); err != nil {
+        return nil, err
+    }
+    if m.batchesSent, err = meter.Int64Counter("gotail.batches_sent",
+        metric.WithDescription("Batches delivered to sink")); err != nil {
+        return nil, err
+    }
+    if m.sendErrors, err = meter.Int64Counter("gotail.send_errors",
+        metric.WithDescription("Sink send errors")); err != nil {
+        return nil, err
+    }
+    if m.decodeErrors, err = meter.Int64Counter("gotail.decode_errors",
+        metric.WithDescription("Lines skipped due to decode errors")); err != nil {
+        return nil, err
+    }
+    return m, nil
+}
+
+func (m *Metrics) TailerOpts(base tail.Options) tail.Options {
+    ctx := context.Background()
+    base.OnRotated = func(_, _ tail.Position) { m.rotations.Add(ctx, 1) }
+    base.OnTruncated = func(_ tail.Position) { m.truncations.Add(ctx, 1) }
+    return base
+}
+
+func (m *Metrics) ForwarderOpts[T any](base forward.Options[T]) forward.Options[T] {
+    ctx := context.Background()
+    base.OnBatchSent = func(n int, _ forward.Position) {
+        m.batchesSent.Add(ctx, 1)
+        m.linesProcessed.Add(ctx, int64(n))
+    }
+    base.OnSendError = func(_ error, _ int, _ bool) { m.sendErrors.Add(ctx, 1) }
+    base.OnDecodeError = func(_ []byte, _ forward.Position, _ error) {
+        m.decodeErrors.Add(ctx, 1)
+    }
+    return base
+}
+```

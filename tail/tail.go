@@ -52,8 +52,14 @@ type Options struct {
 	// Interval is the poll interval. Zero defaults to 1 second.
 	Interval time.Duration
 	// UseFsnotify requests the fsnotify backend when available. Falls back to
-	// polling. (Phase 6 feature; currently always uses polling.)
+	// polling.
 	UseFsnotify bool
+	// Whence controls the initial seek position for the first file opened.
+	// Must be [io.SeekStart], [io.SeekCurrent], or [io.SeekEnd].
+	// Zero (io.SeekStart) reads from the beginning; [io.SeekEnd] skips
+	// existing content and tails only new data. Ignored when a Cursor
+	// provides a resume point.
+	Whence int
 	// StopAtEOF causes Next to return [ErrSourceExhausted] once the active
 	// file reaches EOF instead of blocking for new data.
 	StopAtEOF bool
@@ -176,9 +182,18 @@ func New(opts Options) (*Tailer, error) {
 // isBackup files use StopAtEOF=true so the watcher signals exhaustion.
 func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) error {
 	isActive := t.fileIdx == len(t.files)-1
+	// Whence is a one-shot initial-seek setting; pass it on the first open
+	// (fileIdx==startIdx and no resume cursor) and clear it afterwards so
+	// subsequent opens (advance, rotate) always start at offset 0.
+	whence := io.SeekStart
+	if resume == nil && t.opts.Whence != 0 {
+		whence = t.opts.Whence
+		t.opts.Whence = 0 // consume
+	}
 	wc := watch.Config{
 		Path:         path,
 		Interval:     t.opts.Interval,
+		Whence:       whence,
 		Resume:       resume,
 		StopAtEOF:    !isActive || t.opts.StopAtEOF,
 		NoInodeCheck: t.opts.NoInodeCheck,
