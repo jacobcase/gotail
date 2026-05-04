@@ -88,8 +88,9 @@ type Tailer struct {
 	files []string // enumerated at construction; oldest-first snapshot
 	lr    *watch.LineReader
 
-	fileIdx  int  // index of the currently-watched file in t.files
-	atActive bool // true when fileIdx == len(files)-1
+	fileIdx    int  // index of the currently-watched file in t.files
+	atActive   bool // true when fileIdx == len(files)-1
+	whenceUsed bool // true after the initial seek (opts.Whence) has been applied
 
 	mu        sync.Mutex
 	cur       Position
@@ -182,13 +183,13 @@ func New(opts Options) (*Tailer, error) {
 // isBackup files use StopAtEOF=true so the watcher signals exhaustion.
 func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) error {
 	isActive := t.fileIdx == len(t.files)-1
-	// Whence is a one-shot initial-seek setting; pass it on the first open
-	// (fileIdx==startIdx and no resume cursor) and clear it afterwards so
-	// subsequent opens (advance, rotate) always start at offset 0.
+	// Whence is a one-shot initial-seek setting: it applies only on the first
+	// open (no resume cursor and the initial seek has not yet been consumed).
+	// Subsequent opens triggered by advance/rotate always start at offset 0.
 	whence := io.SeekStart
-	if resume == nil && t.opts.Whence != 0 {
+	if resume == nil && !t.whenceUsed && t.opts.Whence != 0 {
 		whence = t.opts.Whence
-		t.opts.Whence = 0 // consume
+		t.whenceUsed = true
 	}
 	wc := watch.Config{
 		Path:         path,
