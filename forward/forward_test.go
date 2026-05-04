@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -547,6 +549,62 @@ func TestForwarder_EndToEnd(t *testing.T) {
 			t.Fatalf("record %d: want %q, got %q", i, want, got)
 		}
 	}
+}
+
+// ── TestForwarder_FeederExitsOnPermanentError ────────────────────────────────
+
+// blockingSource yields one record, then blocks on ctx until cancelled.
+// It models a live tail source for the leak-detection test: without the
+// child-context wiring in Run, the feeder goroutine would remain parked
+// inside Records(ctx) after a permanent sink error caused Run to return.
+type blockingSource struct{}
+
+func (blockingSource) Records(ctx context.Context) iter.Seq2[tail.Record, error] {
+	return func(yield func(tail.Record, error) bool) {
+		if !yield(tail.Record{Line: []byte("trigger"), Pos: tail.Position{Offset: 1}}, nil) {
+			return
+		}
+		<-ctx.Done()
+	}
+}
+func (blockingSource) Commit(_ context.Context, _ forward.Position) error { return nil }
+func (blockingSource) Done() <-chan struct{}                              { return make(chan struct{}) }
+
+func TestForwarder_FeederExitsOnPermanentError(t *testing.T) {
+	permErr := fmt.Errorf("auth failed: %w", forward.ErrPermanent)
+	sink := forward.SinkFunc[[]byte](func(_ context.Context, _ [][]byte) error {
+		return permErr
+	})
+
+	fwd := mustNewForwarder(t, forward.Options[[]byte]{
+		Source:          blockingSource{},
+		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:            sink,
+		MaxBatchRecords: 1,
+	})
+
+	// Use a long-lived parent ctx — the caller's ctx has no reason to be
+	// cancelled when Run returns. The fix is that Run must cancel its own
+	// derived ctx so the feeder exits.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	g0 := runtime.NumGoroutine()
+
+	if err := fwd.Run(ctx); !errors.Is(err, forward.ErrPermanent) {
+		t.Fatalf("Run: want ErrPermanent, got %v", err)
+	}
+
+	// Caller's ctx is still alive. If the feeder leaked, NumGoroutine stays
+	// elevated. Poll briefly to absorb scheduler latency before failing.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= g0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("feeder goroutine leaked after Run returned: baseline=%d, now=%d", g0, runtime.NumGoroutine())
 }
 
 // ── BenchmarkForwarder_Throughput ─────────────────────────────────────────────

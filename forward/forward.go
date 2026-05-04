@@ -7,6 +7,7 @@ import (
 	"iter"
 	"log/slog"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"github.com/jacobcase/gotail/v2/tail"
@@ -110,10 +111,21 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 		err error
 	}
 
+	// Derive a child context so that any return from Run cancels the feeder
+	// goroutine; wg ensures Run does not return until the feeder has fully
+	// exited. Defers run LIFO: cancel() (registered last) fires first,
+	// freeing the feeder, then wg.Wait() blocks for its exit.
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer cancel()
+
 	// Feed records into a buffered channel so the batch-age timer can interrupt
 	// the wait for the next record.
 	recCh := make(chan recItem, 16)
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer close(recCh)
 		for rec, err := range f.opts.Source.Records(ctx) {
 			select {
