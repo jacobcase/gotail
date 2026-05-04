@@ -167,9 +167,18 @@ func (p *pollWatcher) openFirst() (Event, bool, error) {
 			}
 		} else {
 			// Resume cursor's inode does not match the file currently at Path.
-			// This typically means the checkpointed file has rotated away;
-			// continue from offset 0 of the new file rather than failing,
-			// but log so the dropped resume is not silent.
+			// Fire the observation hook before any decision so observers see
+			// the mismatch regardless of the resolution path.
+			if p.c.OnInodeMismatch != nil {
+				p.c.OnInodeMismatch(r.Inode, inode)
+			}
+			if p.c.FailOnInodeMismatch {
+				return Event{}, false, fmt.Errorf(
+					"watch: resume point inode mismatch on %s: want=%d got=%d: %w",
+					p.c.Path, r.Inode, inode, ErrInodeMismatch)
+			}
+			// Default: continue from offset 0 of the new file, but log so
+			// the dropped resume is not silent.
 			p.logger.Warn("watch: resume point inode mismatch — restarting at offset 0",
 				"path", p.c.Path, "want_inode", r.Inode, "got_inode", inode)
 		}

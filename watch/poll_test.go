@@ -410,3 +410,68 @@ func TestPollWatcher_ResumeInodeMismatch_Warns(t *testing.T) {
 		t.Fatalf("expected inode-mismatch Warn log, got: %s", logBuf.String())
 	}
 }
+
+// TestPollWatcher_ResumeInodeMismatch_FailsWhenConfigured pins the
+// FailOnInodeMismatch contract: Wait returns an error wrapping
+// ErrInodeMismatch instead of falling through to offset 0.
+func TestPollWatcher_ResumeInodeMismatch_FailsWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fail.log")
+	writeFile(t, path, "hello\n")
+
+	resume := watch.Position{File: path, Inode: 1, Offset: 3}
+	w, err := watch.NewPolling(watch.Config{
+		Path:                path,
+		Interval:            10 * time.Millisecond,
+		Resume:              &resume,
+		FailOnInodeMismatch: true,
+	})
+	if err != nil {
+		t.Fatalf("NewPolling: %v", err)
+	}
+	t.Cleanup(func() { w.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = w.Wait(ctx)
+	if !errors.Is(err, watch.ErrInodeMismatch) {
+		t.Fatalf("Wait: want ErrInodeMismatch, got %v", err)
+	}
+}
+
+// TestPollWatcher_OnInodeMismatch_HookFires confirms the observation hook
+// fires regardless of the resolution path (default fallback or fail).
+func TestPollWatcher_OnInodeMismatch_HookFires(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hook.log")
+	writeFile(t, path, "hello\n")
+
+	resume := watch.Position{File: path, Inode: 1, Offset: 3}
+	var hookWant, hookGot uint64
+	hookCalls := 0
+	w, err := watch.NewPolling(watch.Config{
+		Path:     path,
+		Interval: 10 * time.Millisecond,
+		Resume:   &resume,
+		OnInodeMismatch: func(want, got uint64) {
+			hookWant, hookGot = want, got
+			hookCalls++
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPolling: %v", err)
+	}
+	t.Cleanup(func() { w.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := w.Wait(ctx); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("OnInodeMismatch fired %d times, want 1", hookCalls)
+	}
+	if hookWant != 1 || hookGot == 0 {
+		t.Fatalf("OnInodeMismatch args: want=1 got=%d, hookGot must be nonzero (was %d)", hookWant, hookGot)
+	}
+}

@@ -79,15 +79,23 @@ type Options struct {
 	// rotation detection. Use on filesystems with unstable inodes (Windows
 	// ReFS, certain FUSE mounts).
 	NoInodeCheck bool
+	// FailOnInodeMismatch makes [New] return an error wrapping
+	// [ErrInodeMismatch] when the file at the cursor's path exists but has
+	// a different inode than the cursor recorded. Default behaviour is to
+	// log a warning and resume at offset 0, which is safer for most rotation
+	// patterns. Use this when the caller wants explicit failure on resume
+	// divergence (and a chance to errors.Is the result).
+	FailOnInodeMismatch bool
 
 	// Hooks — all optional and nil-safe. Hooks are invoked synchronously
 	// from the read loop and must not block; offload slow work to a
 	// goroutine or buffered channel if needed.
-	OnDropped    func(droppedFiles int)
-	OnRotated    func(from, to Position)
-	OnError      func(err error)
-	OnTruncated  func(at Position)
-	OnCheckpoint func(c Checkpoint)
+	OnDropped        func(droppedFiles int)
+	OnRotated        func(from, to Position)
+	OnError          func(err error)
+	OnTruncated      func(at Position)
+	OnCheckpoint     func(c Checkpoint)
+	OnInodeMismatch  func(want, got uint64)
 }
 
 // Stats is a point-in-time snapshot of counters maintained by a [Tailer].
@@ -203,7 +211,23 @@ func New(ctx context.Context, opts Options) (*Tailer, error) {
 				startIdx = matchIdx
 				resumePos = &cp.Pos
 			} else {
-				// No file matches the checkpoint → apply missing policy.
+				// No file matches the checkpoint by inode. Distinguish two cases:
+				//   (a) the cursor's named path still exists but has a different
+				//       inode (rotation reused the path; inode-mismatch event), or
+				//   (b) the path is gone entirely (drop event).
+				// Both fire the appropriate hook; resolution depends on policy.
+				if cp.Pos.File != "" {
+					if curInode, serr := watch.StatInode(cp.Pos.File); serr == nil && curInode != cp.Pos.Inode {
+						if opts.OnInodeMismatch != nil {
+							opts.OnInodeMismatch(cp.Pos.Inode, curInode)
+						}
+						if opts.FailOnInodeMismatch {
+							return nil, fmt.Errorf(
+								"tail: cursor %s inode mismatch: want=%d got=%d: %w",
+								cp.Pos.File, cp.Pos.Inode, curInode, ErrInodeMismatch)
+						}
+					}
+				}
 				switch opts.OnMissingCheckpoint {
 				case Fail:
 					return nil, ErrCheckpointMissing
@@ -250,13 +274,15 @@ func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) 
 		t.whenceUsed = true
 	}
 	wc := watch.Config{
-		Path:         path,
-		Interval:     t.opts.Interval,
-		Whence:       whence,
-		Resume:       resume,
-		StopAtEOF:    !isActive || t.opts.StopAtEOF,
-		NoInodeCheck: t.opts.NoInodeCheck,
-		Logger:       lg,
+		Path:                path,
+		Interval:            t.opts.Interval,
+		Whence:              whence,
+		Resume:              resume,
+		StopAtEOF:           !isActive || t.opts.StopAtEOF,
+		NoInodeCheck:        t.opts.NoInodeCheck,
+		FailOnInodeMismatch: t.opts.FailOnInodeMismatch,
+		OnInodeMismatch:     t.opts.OnInodeMismatch,
+		Logger:              lg,
 	}
 	var w watch.Watcher
 	var err error

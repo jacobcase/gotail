@@ -133,6 +133,72 @@ func TestTailer_MissingCheckpoint_Fail(t *testing.T) {
 	}
 }
 
+// TestTailer_FailOnInodeMismatch_ReturnsSentinel pins the §3 ext-row
+// requirement that ErrInodeMismatch is reachable as a public sentinel.
+// When the cursor's named file still exists but has a different inode
+// (rotation reused the path), FailOnInodeMismatch returns the sentinel.
+func TestTailer_FailOnInodeMismatch_ReturnsSentinel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rot.log")
+	if err := os.WriteFile(path, []byte("data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save cursor pointing at the path with a deliberately wrong inode —
+	// simulating a rotation that reused the path with a new inode.
+	cur := tail.NewMemoryCursor()
+	stalePos := tail.Position{File: path, Inode: 999999, Offset: 0}
+	_ = cur.Save(context.Background(), tail.Checkpoint{Pos: stalePos})
+
+	_, err := tail.New(context.Background(), tail.Options{
+		Source:              tail.SingleFile(path),
+		Cursor:              cur,
+		Interval:            10 * time.Millisecond,
+		FailOnInodeMismatch: true,
+	})
+	if !errors.Is(err, tail.ErrInodeMismatch) {
+		t.Fatalf("New: want tail.ErrInodeMismatch, got %v", err)
+	}
+}
+
+// TestTailer_OnInodeMismatch_HookFires confirms the observation hook fires
+// when the cursor's path exists with a different inode, regardless of
+// FailOnInodeMismatch (which controls only the failure decision).
+func TestTailer_OnInodeMismatch_HookFires(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hook.log")
+	if err := os.WriteFile(path, []byte("data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cur := tail.NewMemoryCursor()
+	stalePos := tail.Position{File: path, Inode: 999999, Offset: 0}
+	_ = cur.Save(context.Background(), tail.Checkpoint{Pos: stalePos})
+
+	hookCalls := 0
+	var hookWant uint64
+	tr, err := tail.New(context.Background(), tail.Options{
+		Source:              tail.SingleFile(path),
+		Cursor:              cur,
+		Interval:            10 * time.Millisecond,
+		OnMissingCheckpoint: tail.SkipToActive, // force success past mismatch
+		OnInodeMismatch: func(want, got uint64) {
+			hookCalls++
+			hookWant = want
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer tr.Close()
+	if hookCalls != 1 {
+		t.Fatalf("OnInodeMismatch fired %d times, want 1", hookCalls)
+	}
+	if hookWant != 999999 {
+		t.Fatalf("OnInodeMismatch want=%d, expected 999999", hookWant)
+	}
+}
+
 func TestTailer_MissingCheckpoint_SkipToActive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

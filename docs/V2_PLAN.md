@@ -1576,16 +1576,7 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    each Watcher event.
    *Driver:* Pre-review (design-time choice; Position() reflects the
    post-yield invariant the cursor commits against).
-4. **`ErrInodeMismatch` lives in `watch`, not `tail`.** Plan §3 ext-row
-   listed it as a tail-level sentinel. Actual: `watch.ErrInodeMismatch` is
-   defined but the production rotation path **does not return it** —
-   inode mismatch on resume is logged at warn-level and falls through to
-   offset 0 (`watch/poll.go:170-175`, `watch/fsnotify_unix.go:170-173`).
-   The sentinel is effectively unused by current code.
-   *Driver:* [CODE_REVIEW §7 (`pollWatcher.openFirst` does not handle Resume gracefully)](./reviews/CODE_REVIEW.md),
-   which recommended at minimum a Debug log and ideally surfacing
-   `ErrInodeMismatch` so callers can choose. The “surface as sentinel”
-   half is still pending.
+
 ### 11.5 Plan-vs-shipped impact summary
 
 For an auditor or implementer reasoning from this plan, the highest-impact
@@ -1612,8 +1603,12 @@ deltas are:
 - **Compressed-backup behaviour is partial** (§11.3 #2, §11.3 #9):
   detection-and-skip ships, decompression does not. A checkpoint pointing
   at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy.
-- **`ErrInodeMismatch` is dead code in callers** (§11.4 #6). Reasoning
-  that asserts it is returned on resume mismatch is wrong.
+- **`ErrInodeMismatch` now reachable**: re-exported as `tail.ErrInodeMismatch`,
+  fired from `tail.New` when the cursor's path still exists with a different
+  inode. `Options.OnInodeMismatch` observes the event; `Options.FailOnInodeMismatch`
+  promotes it to a `tail.New` error wrapping the sentinel. The watcher
+  config also exposes `Config.OnInodeMismatch` and `Config.FailOnInodeMismatch`
+  for direct watch users.
 - **`forward.Options.OnDropped` intentionally absent at L3.** File drops
   happen inside `Tailer` (during `openFile`/`OnMissingCheckpoint`) before
   records reach the `Forwarder`. The L3 layer has no surface to detect

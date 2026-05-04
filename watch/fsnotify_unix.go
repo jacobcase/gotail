@@ -168,6 +168,14 @@ func (w *fsnotifyWatcher) openFirst() (Event, bool, error) {
 				offset = r.Offset
 			}
 		} else {
+			if w.c.OnInodeMismatch != nil {
+				w.c.OnInodeMismatch(r.Inode, inode)
+			}
+			if w.c.FailOnInodeMismatch {
+				return Event{}, false, fmt.Errorf(
+					"watch: resume point inode mismatch on %s: want=%d got=%d: %w",
+					w.c.Path, r.Inode, inode, ErrInodeMismatch)
+			}
 			w.logger.Warn("watch: resume point inode mismatch — restarting at offset 0",
 				"path", w.c.Path, "want_inode", r.Inode, "got_inode", inode)
 		}

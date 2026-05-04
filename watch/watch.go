@@ -66,6 +66,18 @@ type Config struct {
 	// detection. Use on Windows ReFS, FUSE mounts, or other filesystems with
 	// unstable inodes.
 	NoInodeCheck bool
+	// FailOnInodeMismatch makes the watcher return [ErrInodeMismatch] from
+	// its first Wait when the file at Path exists but has a different inode
+	// than [Config.Resume]. Off by default — the watcher logs a warning and
+	// falls through to offset 0, which is the safer default for most rotation
+	// patterns. Set to true when the caller wants explicit failure (and the
+	// chance to inspect the mismatch via errors.Is) on resume divergence.
+	FailOnInodeMismatch bool
+	// OnInodeMismatch fires when the resume-time inode check fails (the
+	// file at Path exists but has a different inode than Resume.Inode).
+	// Optional and nil-safe. Fires before FailOnInodeMismatch is honoured,
+	// so observers see the mismatch even when the watcher decides to fail.
+	OnInodeMismatch func(want, got uint64)
 }
 
 // New returns a Watcher. It attempts NewFsnotify first; if that returns
