@@ -12,9 +12,12 @@ import (
 //
 //  1. Write data to path+".tmp" with mode.
 //  2. fsync the temp file (data durability).
-//  3. os.Rename(tmp, path).
-//  4. If dirSync, fsync the containing directory (rename durability).
-//  5. Close the temp file fd.
+//  3. Close the temp file fd. Closing before rename is required on Windows
+//     (rename-while-open can fail with sharing violation) and surfaces late
+//     I/O errors that some filesystems (NFS, async mounts) only report at
+//     close time after a successful fsync.
+//  4. os.Rename(tmp, path).
+//  5. If dirSync, fsync the containing directory (rename durability).
 func Write(path string, data []byte, mode os.FileMode, dirSync bool) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
@@ -32,8 +35,11 @@ func Write(path string, data []byte, mode os.FileMode, dirSync bool) error {
 		os.Remove(tmp)
 		return fmt.Errorf("atomicwrite: sync: %w", err)
 	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("atomicwrite: close: %w", err)
+	}
 	if err := os.Rename(tmp, path); err != nil {
-		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("atomicwrite: rename: %w", err)
 	}
@@ -44,7 +50,5 @@ func Write(path string, data []byte, mode os.FileMode, dirSync bool) error {
 			d.Close()
 		}
 	}
-
-	_ = f.Close()
 	return nil
 }
