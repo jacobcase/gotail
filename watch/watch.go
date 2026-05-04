@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"time"
 )
 
@@ -89,6 +90,16 @@ func New(c Config) (Watcher, error) {
 		return NewPolling(c)
 	}
 	return nil, err
+}
+
+// StatInode returns the inode number of the file at path using os.Stat.
+// Returns 0 on platforms or filesystems where inodes are not available.
+func StatInode(path string) (uint64, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return fileInode(fi), nil
 }
 
 var (

@@ -122,51 +122,51 @@ internal/
 
 ### Sub-tasks
 
-- [ ] `tail/tail.go`: type alias `Position = watch.Position` (Decision #21).
-- [ ] `tail/tail.go`: define `Record` struct (`Line []byte`, `Pos Position`). Doc that `Line` is valid until next iteration.
-- [ ] `tail/tail.go`: define `Options` per §4 (Source, Cursor, Logger, Interval, UseFsnotify=false, StopAtEOF, OnMissingCheckpoint, hooks: OnDropped, OnRotated, OnError, OnTruncated, OnCheckpoint).
-- [ ] `tail/tail.go`: define `MissingPolicy` enum (`FallbackOldest` default, `Fail`, `SkipToActive`).
-- [ ] `tail/source.go`: define `Source` interface: `Enumerate(ctx) ([]string, error)`. Order: oldest first, active last.
-- [ ] `tail/source.go`: `SingleFile(path string) Source` — returns `[]string{path}`.
-- [ ] `tail/source.go`: `MemorySource(paths []string) Source` — returns paths as-is (immutable test helper).
-- [ ] `tail/cursor.go`: define `Checkpoint` struct (`Pos Position`, `Meta json.RawMessage`).
-- [ ] `tail/cursor.go`: define `Cursor` interface: `Load`, `Save`, `Close`.
-- [ ] `tail/cursor.go`: `NewMemoryCursor() Cursor` — in-memory implementation for tests.
-- [ ] `tail/cursor.go`: define `SyncMode` enum (`SyncAlways` default, `SyncOnCommit`, `SyncBackground`).
-- [ ] `tail/cursor.go`: `NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error)`. Options: `WithDirSync(bool)` default on, `WithSyncMode`, `WithFileMode` default 0o600. Defer `WithFlock` to Phase 3.
-- [ ] `tail/cursor.go`: cursor file format = JSON with `{pos, meta, version: 1}` (Decision #5). Reject `len(meta) > 64 KiB` (Decision #6).
-- [ ] `internal/atomicwrite/atomicwrite.go`: `Write(path string, data []byte, mode os.FileMode, dirSync bool) error` — write to `path.tmp`, `f.Sync`, `os.Rename`, optional `dir.Sync`.
-- [ ] `tail/tail.go`: `New(opts Options) (*Tailer, error)`. Constructs Watcher from Source's first file, loads Cursor, applies `MissingPolicy`.
-- [ ] `tail/tail.go`: `Records(ctx) iter.Seq2[Record, error]` — Go 1.23+ range-over-func. **Cursor is NOT auto-advanced** (invariant #3).
-- [ ] `tail/tail.go`: `Next(ctx) (Record, error)` — pull-style escape hatch.
-- [ ] `tail/tail.go`: `Commit(ctx, pos) error` — calls `Cursor.Save` with current Meta preserved.
-- [ ] `tail/tail.go`: `CommitWithMeta(ctx, pos, meta any) error` — JSON-encodes meta and saves.
-- [ ] `tail/tail.go`: `Position() Position`, `Done() <-chan struct{}`, `Close() error` (idempotent).
-- [ ] `tail/tail.go`: enforce all 7 Tailer invariants from §4 (position monotonicity, inode change resets offset, no auto-advance, missing-checkpoint policy, Done() one-shot, Close() terminal, lock continuous).
-- [ ] `tail/errors.go`: `ErrSourceExhausted`, `ErrCheckpointMissing`. (`ErrLockHeld` defined here too but unused until Phase 3.)
-- [ ] `tail/doc.go`: package overview, vocabulary table (Position/Checkpoint/Cursor), live-tail vs StopAtEOF backfill modes.
+- [x] `tail/tail.go`: type alias `Position = watch.Position` (Decision #21).
+- [x] `tail/tail.go`: define `Record` struct (`Line []byte`, `Pos Position`). Doc that `Line` is valid until next iteration.
+- [x] `tail/tail.go`: define `Options` per §4 (Source, Cursor, Logger, Interval, UseFsnotify=false, StopAtEOF, OnMissingCheckpoint, hooks: OnDropped, OnRotated, OnError, OnTruncated, OnCheckpoint).
+- [x] `tail/tail.go`: define `MissingPolicy` enum (`FallbackOldest` default, `Fail`, `SkipToActive`).
+- [x] `tail/source.go`: define `Source` interface: `Enumerate(ctx) ([]string, error)`. Order: oldest first, active last.
+- [x] `tail/source.go`: `SingleFile(path string) Source` — returns `[]string{path}`.
+- [x] `tail/source.go`: `MemorySource(paths []string) Source` — returns paths as-is (immutable test helper).
+- [x] `tail/cursor.go`: define `Checkpoint` struct (`Pos Position`, `Meta json.RawMessage`).
+- [x] `tail/cursor.go`: define `Cursor` interface: `Load`, `Save`, `Close`.
+- [x] `tail/cursor.go`: `NewMemoryCursor() Cursor` — in-memory implementation for tests.
+- [x] `tail/cursor.go`: define `SyncMode` enum (`SyncAlways` default, `SyncOnCommit`, `SyncBackground`).
+- [x] `tail/cursor.go`: `NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error)`. Options: `WithDirSync(bool)` default on, `WithSyncMode`, `WithFileMode` default 0o600. Defer `WithFlock` to Phase 3.
+- [x] `tail/cursor.go`: cursor file format = JSON with `{pos, meta, version: 1}` (Decision #5). Reject `len(meta) > 64 KiB` (Decision #6).
+- [x] `internal/atomicwrite/atomicwrite.go`: `Write(path string, data []byte, mode os.FileMode, dirSync bool) error` — write to `path.tmp`, `f.Sync`, `os.Rename`, optional `dir.Sync`.
+- [x] `tail/tail.go`: `New(opts Options) (*Tailer, error)`. Constructs Watcher from Source's first file, loads Cursor, applies `MissingPolicy`.
+- [x] `tail/tail.go`: `Records(ctx) iter.Seq2[Record, error]` — Go 1.23+ range-over-func. **Cursor is NOT auto-advanced** (invariant #3).
+- [x] `tail/tail.go`: `Next(ctx) (Record, error)` — pull-style escape hatch.
+- [x] `tail/tail.go`: `Commit(ctx, pos) error` — calls `Cursor.Save` with current Meta preserved.
+- [x] `tail/tail.go`: `CommitWithMeta(ctx, pos, meta any) error` — JSON-encodes meta and saves.
+- [x] `tail/tail.go`: `Position() Position`, `Done() <-chan struct{}`, `Close() error` (idempotent).
+- [x] `tail/tail.go`: enforce all 7 Tailer invariants from §4 (position monotonicity, inode change resets offset, no auto-advance, missing-checkpoint policy, Done() one-shot, Close() terminal, lock continuous).
+- [x] `tail/errors.go`: `ErrSourceExhausted`, `ErrCheckpointMissing`. (`ErrLockHeld` defined here too but unused until Phase 3.)
+- [x] `tail/doc.go`: package overview, vocabulary table (Position/Checkpoint/Cursor), live-tail vs StopAtEOF backfill modes.
 
 ### Tests (`tail/`)
 
-- [ ] `TestSingleFileSource` — basic enumeration.
-- [ ] `TestFileCursor_AtomicSave` — kill mid-save by removing tmp; verify on-disk is fully old or fully new, never partial.
-- [ ] `TestFileCursor_DirSync` — verify `WithDirSync(false)` threads through.
-- [ ] `TestFileCursor_Meta_RoundTrip` — save with meta, load, unmarshal; assert equality.
-- [ ] `TestFileCursor_OversizeMeta` — 65 KiB meta; assert error.
-- [ ] `TestTailer_ResumeAcrossRestart` — write 20 lines, read 10, commit, close; new Tailer + same cursor; assert resume at line 11.
-- [ ] `TestTailer_MissingCheckpoint_Fail` — cursor names a missing file; assert `ErrCheckpointMissing`.
-- [ ] `TestTailer_MissingCheckpoint_SkipToActive` — same, `SkipToActive`; assert resume at active offset 0.
-- [ ] `TestTailer_StopAtEOF_ClosesDone` — exhaust source; `<-Done()` returns.
-- [ ] `TestTailer_Records_Iterator` — exercise `iter.Seq2` form.
-- [ ] `TestTailer_Next_PullStyle` — exercise pull form.
-- [ ] `TestTailer_Close_Idempotent` — `Close` twice; second is no-op.
-- [ ] `TestTailer_CommitWithMeta` — round-trip user metadata via cursor reload.
-- [ ] `FuzzCursorParse` — random JSON to `json.Unmarshal(data, &Checkpoint)`; must not panic.
-- [ ] `TestTailer_PendingLineDiscardedOnClose` — uncommitted line is dropped per Decision #19.
+- [x] `TestSingleFileSource` — basic enumeration.
+- [x] `TestFileCursor_AtomicSave` — kill mid-save by removing tmp; verify on-disk is fully old or fully new, never partial.
+- [x] `TestFileCursor_DirSync` — verify `WithDirSync(false)` threads through.
+- [x] `TestFileCursor_Meta_RoundTrip` — save with meta, load, unmarshal; assert equality.
+- [x] `TestFileCursor_OversizeMeta` — 65 KiB meta; assert error.
+- [x] `TestTailer_ResumeAcrossRestart` — write 20 lines, read 10, commit, close; new Tailer + same cursor; assert resume at line 11.
+- [x] `TestTailer_MissingCheckpoint_Fail` — cursor names a missing file; assert `ErrCheckpointMissing`.
+- [x] `TestTailer_MissingCheckpoint_SkipToActive` — same, `SkipToActive`; assert resume at active offset 0.
+- [x] `TestTailer_StopAtEOF_ClosesDone` — exhaust source; `<-Done()` returns.
+- [x] `TestTailer_Records_Iterator` — exercise `iter.Seq2` form.
+- [x] `TestTailer_Next_PullStyle` — exercise pull form.
+- [x] `TestTailer_Close_Idempotent` — `Close` twice; second is no-op.
+- [x] `TestTailer_CommitWithMeta` — round-trip user metadata via cursor reload.
+- [x] `FuzzCursorParse` — random JSON to `json.Unmarshal(data, &Checkpoint)`; must not panic.
+- [x] `TestTailer_PendingLineDiscardedOnClose` — uncommitted line is dropped per Decision #19.
 
 ### Benchmarks
 
-- [ ] `BenchmarkCursor_Save` — <100 µs P50 (no fsync), <10 ms P99 (with fsync).
+- [x] `BenchmarkCursor_Save` — <100 µs P50 (no fsync), <10 ms P99 (with fsync).
 
 **Deliverable:** L2 single-file. Driving reqs 2, 6, 7 satisfied for the single-file shape.
 
