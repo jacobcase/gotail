@@ -58,6 +58,15 @@ type Options[T any] struct {
 	InitialBackoff time.Duration // first retry sleep; default 100ms
 	MaxBackoff     time.Duration // backoff ceiling; default 30s
 
+	// PrefetchBuffer is the size of the internal channel between the source
+	// reader and the batching consumer. The reader may pull up to this many
+	// records past the source boundary while the consumer is blocked in a
+	// sink retry, so it bounds the additional memory held during retries to
+	// roughly PrefetchBuffer × line_size. Zero or negative selects the
+	// default of 16, which suits typical (few-KB) line sizes; lower it when
+	// records are large or memory is tight.
+	PrefetchBuffer int
+
 	Logger *slog.Logger
 
 	// Hooks — all optional and nil-safe.
@@ -96,6 +105,9 @@ func New[T any](opts Options[T]) (*Forwarder[T], error) {
 	if opts.MaxBackoff <= 0 {
 		opts.MaxBackoff = 30 * time.Second
 	}
+	if opts.PrefetchBuffer <= 0 {
+		opts.PrefetchBuffer = 16
+	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
@@ -121,8 +133,9 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 	defer cancel()
 
 	// Feed records into a buffered channel so the batch-age timer can interrupt
-	// the wait for the next record.
-	recCh := make(chan recItem, 16)
+	// the wait for the next record. The buffer also lets the feeder read ahead
+	// while the consumer is blocked in a sink retry; see Options.PrefetchBuffer.
+	recCh := make(chan recItem, f.opts.PrefetchBuffer)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
