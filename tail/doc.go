@@ -41,6 +41,14 @@
 //   - [Checkpoint.Meta] is opaque [json.RawMessage] passed through verbatim.
 //     Schema discipline for Meta is the caller's responsibility.
 //
+// # Hooks
+//
+// [Options] exposes optional, nil-safe callbacks (OnRotated, OnError,
+// OnTruncated, OnCheckpoint, OnDropped). They fire synchronously from the
+// read loop and must not block: a slow hook stalls record delivery and can
+// delay rotation handling. If a hook needs to do I/O, hand the event off
+// to a goroutine or buffered channel.
+//
 // # Usage
 //
 //	cur, _ := tail.NewFileCursor("/var/run/myapp.cursor")

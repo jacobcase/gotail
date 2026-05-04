@@ -71,7 +71,9 @@ type Options struct {
 	// ReFS, certain FUSE mounts).
 	NoInodeCheck bool
 
-	// Hooks — all optional and nil-safe.
+	// Hooks — all optional and nil-safe. Hooks are invoked synchronously
+	// from the read loop and must not block; offload slow work to a
+	// goroutine or buffered channel if needed.
 	OnDropped    func(droppedFiles int)
 	OnRotated    func(from, to Position)
 	OnError      func(err error)

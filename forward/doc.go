@@ -21,6 +21,9 @@
 //
 // [Options] exposes several nil-safe hooks for observability:
 // OnBatchSent, OnSendError, OnCommitted, OnDecodeError, OnBackoffSleep.
+// They fire synchronously from the batching loop and must not block:
+// a slow hook stalls send/retry/commit. If a hook needs to do I/O,
+// hand the event off to a goroutine or buffered channel.
 //
 // # slog keys
 //

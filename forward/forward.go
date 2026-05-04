@@ -75,7 +75,9 @@ type Options[T any] struct {
 
 	Logger *slog.Logger
 
-	// Hooks — all optional and nil-safe.
+	// Hooks — all optional and nil-safe. Hooks are invoked synchronously
+	// from the batching loop and must not block; offload slow work to a
+	// goroutine or buffered channel if needed.
 	OnBatchSent    func(n int, pos Position)
 	OnSendError    func(err error, attempt int, willRetry bool)
 	OnCommitted    func(pos Position)
