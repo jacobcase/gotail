@@ -288,7 +288,7 @@ func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, pos Positio
 // rand(0, min(MaxBackoff, InitialBackoff * 2^attempt)).
 func (f *Forwarder[T]) jitteredBackoff(attempt int) time.Duration {
 	ceiling := f.opts.InitialBackoff
-	for i := 0; i < attempt; i++ {
+	for range attempt {
 		ceiling *= 2
 		if ceiling <= 0 || ceiling > f.opts.MaxBackoff {
 			ceiling = f.opts.MaxBackoff

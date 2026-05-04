@@ -279,7 +279,7 @@ func (l *LineReader) skipToNewline(ctx context.Context) {
 			return
 		}
 		n, err := l.src.Read(l.buf)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			l.pos.Offset++
 			if l.buf[i] == '\n' {
 				l.head = i + 1
