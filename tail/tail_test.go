@@ -625,6 +625,126 @@ func watchStatInode(path string) (uint64, error) {
 	return watch.StatInode(path)
 }
 
+// TestTailer_ResumeAcrossLumberjackBackupsToActive pins the headline use case:
+// commit on a backup file partway through the series, restart, resume from
+// the cursor, and continue rotating through remaining backups into the
+// active file with zero gaps and zero duplicates.
+//
+// Existing coverage is split: TestTailer_ResumeAcrossRestart exercises a
+// single file, and TestTailer_RotatesAcrossLumberjackBackups exercises
+// multi-file rotation but without a restart. This test combines them.
+func TestTailer_ResumeAcrossLumberjackBackupsToActive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	active := filepath.Join(dir, "app.log")
+	backup1 := filepath.Join(dir, "app-2024-01-01T00-00-00.log")
+	backup2 := filepath.Join(dir, "app-2024-01-02T00-00-00.log")
+
+	// 7 records spread across three files. Resume must land mid-backup2
+	// (after the 4th record), yielding the remaining 3 records on restart.
+	if err := os.WriteFile(backup1, []byte("b1a\nb1b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup2, []byte("b2a\nb2b\nb2c\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(active, []byte("a1\na2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantAll := []string{"b1a", "b1b", "b2a", "b2b", "b2c", "a1", "a2"}
+
+	// Pre-seed the cursor pointing at backup1 offset 0 so the first Tailer
+	// starts at the oldest file. (Without a cursor, New defaults to the
+	// active file, which is the right behavior for live tail but wrong for
+	// "drain backlog" first runs.)
+	inode1, err := watchStatInode(backup1)
+	if err != nil {
+		t.Fatalf("StatInode backup1: %v", err)
+	}
+	cur := tail.NewMemoryCursor()
+	if err := cur.Save(ctx, tail.Checkpoint{
+		Pos: tail.Position{File: backup1, Inode: inode1, Offset: 0},
+	}); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
+
+	// First Tailer: read the first 4 records, commit the 4th's position,
+	// close. The 4th record is "b2b" inside backup2.
+	tr1 := mustNew(t, tail.Options{
+		Source:    tail.Lumberjack(active),
+		Cursor:    cur,
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	})
+
+	var firstRun []string
+	var lastPos tail.Position
+	for i := 0; i < 4; i++ {
+		rec, err := tr1.Next(ctx)
+		if err != nil {
+			t.Fatalf("first run Next #%d: %v", i, err)
+		}
+		firstRun = append(firstRun, string(rec.Line))
+		lastPos = rec.Pos
+	}
+	if err := tr1.Commit(ctx, lastPos); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	tr1.Close()
+
+	if got, want := firstRun, wantAll[:4]; !equalStrings(got, want) {
+		t.Fatalf("first run: want %v, got %v", want, got)
+	}
+	// Cursor must point inside backup2, not active or backup1.
+	if filepath.Base(lastPos.File) != filepath.Base(backup2) {
+		t.Fatalf("commit position file: want %s, got %s",
+			filepath.Base(backup2), filepath.Base(lastPos.File))
+	}
+
+	// Second Tailer: resume. It must yield the remaining 3 records,
+	// crossing backup2 → active without re-emitting committed lines.
+	tr2 := mustNew(t, tail.Options{
+		Source:    tail.Lumberjack(active),
+		Cursor:    cur,
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	})
+	defer tr2.Close()
+
+	var secondRun []string
+	for rec, err := range tr2.Records(ctx) {
+		if err != nil {
+			break
+		}
+		secondRun = append(secondRun, string(rec.Line))
+	}
+
+	if got, want := secondRun, wantAll[4:]; !equalStrings(got, want) {
+		t.Fatalf("second run: want %v, got %v", want, got)
+	}
+
+	// Combined runs must equal the original series exactly: no loss, no
+	// duplication across the restart boundary.
+	combined := append(append([]string(nil), firstRun...), secondRun...)
+	if !equalStrings(combined, wantAll) {
+		t.Fatalf("combined: want %v, got %v", wantAll, combined)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // BenchmarkCursor_Save measures the per-Save cost.
 func BenchmarkCursor_Save(b *testing.B) {
 	ctx := context.Background()
