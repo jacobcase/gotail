@@ -476,7 +476,9 @@ type Options[T any] struct {
     OnSendError    func(err error, attempt int, willRetry bool)
     OnCommitted    func(pos Position)
     OnDecodeError  func(line []byte, pos Position, err error)
-    OnDropped      func(droppedFiles int)
+    // OnDropped intentionally absent at L3 — drops occur in the Tailer (L2)
+    // before records reach the Forwarder. Use tail.Options.OnDropped instead.
+    // See §11.5 for rationale.
     OnBackoffSleep func(d time.Duration)
 
     Logger *slog.Logger
@@ -1404,7 +1406,6 @@ that explicitly rather than fabricating a review back-reference.
 
 | Plan reference | What the plan committed | What ships today | Driver |
 |---|---|---|---|
-| §4 L3 Options | `OnDropped func(droppedFiles int)` on `forward.Options` | Not implemented on `forward.Options`. The hook lives only on `tail.Options`. The Forwarder has no surface for files-dropped accounting. | Pre-review (never implemented). |
 | §4 L3 Options | `OnBatchSent func(records int, bytes int, latency time.Duration)` | Signature changed: `OnBatchSent func(n int, pos Position)`. **Both** `bytes` and `latency` were dropped from the hook payload; `pos` was added. Metrics consumers cannot derive batch-bytes or send latency from this hook. | Pre-review (shipped before reviews). |
 | §3 ext, §5.2 | `tail.WithoutInodeCheck()` cursor option | Renamed to a flag on `tail.Options.NoInodeCheck bool`. Functionally close, but the option is on `Options`, not on `FileCursorOption`, because inode comparison happens in the watcher / `findFileByInode`, not inside the cursor. | Pre-review (design-time choice). |
 | Decision #4 | “Drop `golang.org/x/sys` dependency.” | Direct dep is dropped (`go.mod` shows it only `// indirect`), but it is still pulled in transitively by `fsnotify`. Spirit-of-the-plan compliance, not letter. | [PERF_REVIEW §H4](./reviews/PERF_REVIEW.md) tightened the stat path to a stdlib-only `statSizeInode` helper, eliminating the last in-tree x/sys touchpoints. The transitive pull from fsnotify remains. |
@@ -1622,11 +1623,11 @@ deltas are:
   preserved by `LineReader` keeping the old fd open (§11.2 #1). Any
   reasoning about rotation correctness must be against the LineReader
   drain, not the plan’s `PreRotation.Reader`.
-- **No `WithSyncMode`**: all `FileCursor.Save` calls are synchronous fsync
-  (§11.1). A caller that relied on `SyncBackground` for throughput will not
-  find it.
-- **No `WithCursorMigration`** (§11.1): a future schema bump cannot land
-  without a hard cut.
+- **`WithSyncMode` now ships** (`SyncAlways`, `SyncOnCommit`, `SyncBackground`
+  via `Syncer` extension interface — §E1). Driving req 2c is fully met.
+- **`WithCursorMigration` now ships** (§C1): schema bumps can land with a
+  user-supplied migrator; `ErrUnsupportedCursorVersion` is still the sentinel
+  when no migrator is configured.
 - **`forward.OnBatchSent` lost `bytes` and `latency`** (§11.1). Metrics
   pipelines wired to the plan’s signature will not compile.
 - **`forward.RecordSource` is pull-style** (§11.2 #2): third-party
@@ -1639,3 +1640,12 @@ deltas are:
   at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy.
 - **`ErrInodeMismatch` is dead code in callers** (§11.4 #6). Reasoning
   that asserts it is returned on resume mismatch is wrong.
+- **`forward.Options.OnDropped` intentionally absent at L3.** File drops
+  happen inside `Tailer` (during `openFile`/`OnMissingCheckpoint`) before
+  records reach the `Forwarder`. The L3 layer has no surface to detect
+  drops; adding one would require a new channel on `Tailer` and a
+  `select`-arm in `Forwarder.Run` (~80 LOC architectural change) for a
+  hook that already exists on `tail.Options.OnDropped`. Decision: L3 does
+  not duplicate L2 hooks. Callers needing drop accounting should wire
+  `tail.Options.OnDropped` alongside the `Forwarder`. The §4 L3 Options
+  list has been updated to remove `OnDropped`.
