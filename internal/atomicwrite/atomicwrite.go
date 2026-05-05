@@ -18,9 +18,13 @@ import (
 //     close time after a successful fsync.
 //  4. os.Rename(tmp, path).
 //  5. If dirSync, fsync the containing directory (rename durability).
+//
+// Symlink safety: a pre-existing tmp at path+".tmp" must not redirect the
+// open through a symlink. Unix builds add O_NOFOLLOW; Windows builds reject
+// reparse points before opening. See openTmp_*.go.
 func Write(path string, data []byte, mode os.FileMode, dirSync bool) error {
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	f, err := openTmp(tmp, mode)
 	if err != nil {
 		return fmt.Errorf("atomicwrite: create %s: %w", tmp, err)
 	}

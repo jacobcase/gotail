@@ -79,13 +79,14 @@ type Options struct {
 	// rotation detection. Use on filesystems with unstable inodes (Windows
 	// ReFS, certain FUSE mounts).
 	NoInodeCheck bool
-	// FailOnInodeMismatch makes [New] return an error wrapping
-	// [ErrInodeMismatch] when the file at the cursor's path exists but has
-	// a different inode than the cursor recorded. Default behaviour is to
-	// log a warning and resume at offset 0, which is safer for most rotation
-	// patterns. Use this when the caller wants explicit failure on resume
-	// divergence (and a chance to errors.Is the result).
-	FailOnInodeMismatch bool
+	// AllowInodeMismatch controls behaviour when the file at the cursor's
+	// path still exists but has a different inode than the cursor recorded.
+	// Default (false) is fail-safe: [New] returns an error wrapping
+	// [ErrInodeMismatch], which prevents silent ingest of substituted content
+	// in shared-FS / multi-tenant deployments. Set to true to restore the
+	// pre-fix v2 behaviour: log a warning, fire [OnInodeMismatch] (if set),
+	// and fall through to [OnMissingCheckpoint] policy.
+	AllowInodeMismatch bool
 	// RequireCursor causes [New] to return an error when Cursor is nil.
 	// Use this to prevent accidental deployment without checkpointing
 	// (e.g. a nil cursor from a missing YAML field).
@@ -179,13 +180,27 @@ func New(ctx context.Context, opts Options) (*Tailer, error) {
 	if opts.Source == nil {
 		return nil, errors.New("tail: Options.Source must not be nil")
 	}
+	if opts.RequireCursor && opts.Cursor == nil {
+		return nil, errors.New("tail: RequireCursor is set but Cursor is nil")
+	}
 	if opts.SkipExisting && opts.Whence != 0 {
 		return nil, errors.New("tail: SkipExisting and Whence are mutually exclusive")
+	}
+	// SE-3: io.SeekCurrent has no defined semantics here (no resume point to
+	// seek relative to) and silently falls through to SeekStart in the
+	// watcher. Reject it explicitly so callers see the gap immediately.
+	if opts.Whence != 0 && opts.Whence != io.SeekStart && opts.Whence != io.SeekEnd {
+		return nil, fmt.Errorf("tail: Options.Whence %d is invalid (must be io.SeekStart or io.SeekEnd)", opts.Whence)
 	}
 	if opts.SkipExisting {
 		opts.Whence = io.SeekEnd
 	}
-	if opts.Interval <= 0 {
+	// SE-11: negative Interval was silently coerced to 1s; reject it so
+	// YAML-mapper bugs (e.g. unset duration → -1) don't get a default.
+	if opts.Interval < 0 {
+		return nil, fmt.Errorf("tail: Options.Interval must not be negative, got %v", opts.Interval)
+	}
+	if opts.Interval == 0 {
 		opts.Interval = time.Second
 	}
 	lg := opts.Logger
@@ -229,7 +244,7 @@ func New(ctx context.Context, opts Options) (*Tailer, error) {
 						if opts.OnInodeMismatch != nil {
 							opts.OnInodeMismatch(cp.Pos.Inode, curInode)
 						}
-						if opts.FailOnInodeMismatch {
+						if !opts.AllowInodeMismatch {
 							return nil, fmt.Errorf(
 								"tail: cursor %s inode mismatch: want=%d got=%d: %w",
 								cp.Pos.File, cp.Pos.Inode, curInode, ErrInodeMismatch)
@@ -282,15 +297,15 @@ func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) 
 		t.whenceUsed = true
 	}
 	wc := watch.Config{
-		Path:                path,
-		Interval:            t.opts.Interval,
-		Whence:              whence,
-		Resume:              resume,
-		StopAtEOF:           !isActive || t.opts.StopAtEOF,
-		NoInodeCheck:        t.opts.NoInodeCheck,
-		FailOnInodeMismatch: t.opts.FailOnInodeMismatch,
-		OnInodeMismatch:     t.opts.OnInodeMismatch,
-		Logger:              lg,
+		Path:               path,
+		Interval:           t.opts.Interval,
+		Whence:             whence,
+		Resume:             resume,
+		StopAtEOF:          !isActive || t.opts.StopAtEOF,
+		NoInodeCheck:       t.opts.NoInodeCheck,
+		AllowInodeMismatch: t.opts.AllowInodeMismatch,
+		OnInodeMismatch:    t.opts.OnInodeMismatch,
+		Logger:             lg,
 	}
 	var w watch.Watcher
 	var err error

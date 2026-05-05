@@ -48,8 +48,8 @@ func NewPolling(c Config) (Watcher, error) {
 	if c.Interval == 0 {
 		c.Interval = time.Second
 	}
-	if c.Whence != io.SeekStart && c.Whence != io.SeekCurrent && c.Whence != io.SeekEnd {
-		return nil, fmt.Errorf("watch: Config.Whence %v is invalid", c.Whence)
+	if c.Whence != io.SeekStart && c.Whence != io.SeekEnd {
+		return nil, fmt.Errorf("watch: Config.Whence %v is invalid (must be io.SeekStart or io.SeekEnd)", c.Whence)
 	}
 	lg := c.Logger
 	if lg == nil {
@@ -172,12 +172,12 @@ func (p *pollWatcher) openFirst() (Event, bool, error) {
 			if p.c.OnInodeMismatch != nil {
 				p.c.OnInodeMismatch(r.Inode, inode)
 			}
-			if p.c.FailOnInodeMismatch {
+			if !p.c.AllowInodeMismatch {
 				return Event{}, false, fmt.Errorf(
 					"watch: resume point inode mismatch on %s: want=%d got=%d: %w",
 					p.c.Path, r.Inode, inode, ErrInodeMismatch)
 			}
-			// Default: continue from offset 0 of the new file, but log so
+			// Allowed: continue from offset 0 of the new file, but log so
 			// the dropped resume is not silent.
 			p.logger.Warn("watch: resume point inode mismatch — restarting at offset 0",
 				"path", p.c.Path, "want_inode", r.Inode, "got_inode", inode)

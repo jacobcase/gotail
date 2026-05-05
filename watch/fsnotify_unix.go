@@ -46,8 +46,8 @@ func NewFsnotify(c Config) (Watcher, error) {
 	if c.Path == "" {
 		return nil, errors.New("watch: Config.Path must not be empty")
 	}
-	if c.Whence != io.SeekStart && c.Whence != io.SeekCurrent && c.Whence != io.SeekEnd {
-		return nil, fmt.Errorf("watch: Config.Whence %v is invalid", c.Whence)
+	if c.Whence != io.SeekStart && c.Whence != io.SeekEnd {
+		return nil, fmt.Errorf("watch: Config.Whence %v is invalid (must be io.SeekStart or io.SeekEnd)", c.Whence)
 	}
 	lg := c.Logger
 	if lg == nil {
@@ -171,7 +171,7 @@ func (w *fsnotifyWatcher) openFirst() (Event, bool, error) {
 			if w.c.OnInodeMismatch != nil {
 				w.c.OnInodeMismatch(r.Inode, inode)
 			}
-			if w.c.FailOnInodeMismatch {
+			if !w.c.AllowInodeMismatch {
 				return Event{}, false, fmt.Errorf(
 					"watch: resume point inode mismatch on %s: want=%d got=%d: %w",
 					w.c.Path, r.Inode, inode, ErrInodeMismatch)

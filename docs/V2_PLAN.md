@@ -222,7 +222,7 @@ type Watcher interface {
 type Config struct {
     Path         string
     Interval     time.Duration  // poll interval; 0 = 1s default
-    Whence       int            // io.SeekStart | io.SeekCurrent | io.SeekEnd
+    Whence       int            // io.SeekStart | io.SeekEnd (SeekCurrent rejected — §11.4 #3)
     Resume       *Position      // optional resume point; subject to inode match
     StopAtEOF    bool
     Logger       *slog.Logger   // optional; default = slog.Default()
@@ -355,12 +355,15 @@ type Record struct {
 type Options struct {
     Source              Source
     Cursor              Cursor             // nil = no persistence (acts like L1)
+    RequireCursor       bool               // §11.3 #11 — error from New if Cursor is nil
     Logger              *slog.Logger
-    Interval            time.Duration
+    Interval            time.Duration       // negative rejected (§11.4 #5)
     ForcePolling        bool
 
     StopAtEOF           bool
     OnMissingCheckpoint MissingPolicy
+    AllowInodeMismatch  bool               // §11.4 #6 — default false = fail-safe;
+                                            // true falls through to OnMissingCheckpoint policy
 
     // Hooks. All optional; nil-safe.
     OnDropped     func(droppedFiles int)
@@ -368,6 +371,7 @@ type Options struct {
     OnError       func(err error)
     OnTruncated   func(at Position)
     OnCheckpoint  func(c Checkpoint)
+    OnInodeMismatch func(want, got uint64)
 }
 
 type MissingPolicy int
@@ -468,7 +472,8 @@ type Options[T any] struct {
     // Retry policy.
     InitialBackoff time.Duration
     MaxBackoff     time.Duration
-    BackoffJitter  float64        // 0..1, default 0.2
+    BackoffJitter  float64        // 0..1; 0 = deterministic (no implicit default — §11.4 #4)
+    MaxAttempts    int            // 0 = unlimited (§11.3 #10)
 
     // Hooks. OnCommitted fires after a successful Sink.Send + Source.Commit;
     // distinct from L2's OnCheckpoint (which fires on Cursor.Save).
@@ -599,11 +604,12 @@ This makes "fsnotify just works" the default while preserving an escape hatch fo
 
 **Atomic write protocol:**
 
-1. Write to `<cursor_path>.tmp`.
-2. `f.Sync()` (fsync the data + metadata of the temp file).
-3. `os.Rename(tmp, final)`.
-4. (Optional, default on) `dir.Sync()` to fsync the directory entry. Required for power-loss durability of the rename itself on ext4/xfs/etc.
-5. Close the temp file's fd.
+1. Open `<cursor_path>.tmp` with `O_WRONLY|O_CREATE|O_TRUNC|O_EXCL|O_NOFOLLOW`. A pre-existing symlink is refused; a stale regular tmp from a crashed prior write is unlinked first so `O_EXCL` succeeds. (Symlink refusal — §11.4 #1.)
+2. Write the cursor bytes.
+3. `f.Sync()` (fsync the data + metadata of the temp file).
+4. Close the temp file's fd before renaming (Windows requirement; surfaces NFS/async-mount close-time errors). (See §11.2 #4.)
+5. `os.Rename(tmp, final)`.
+6. (Optional, default on) `dir.Sync()` to fsync the directory entry. Required for power-loss durability of the rename itself on ext4/xfs/etc.
 
 This is the standard atomic-update pattern. Implementation lives in `internal/atomicwrite/` so L2 and any future user can share it.
 
@@ -665,9 +671,11 @@ func NewMemoryCursor() Cursor
 
 // Options
 WithDirSync(on bool)
-WithFlock(lockPath string)
+WithFlock(lockPath string)        // must differ from cursor path (§11.4 #7)
 WithSyncMode(SyncMode)
-WithFileMode(os.FileMode)         // default 0o600
+WithFileMode(os.FileMode)         // default 0o600; rejects group/world-write
+                                   // and special bits (§11.4 #8)
+WithSyncBackgroundInterval(d)     // requires WithSyncMode(SyncBackground) (§11.4 #9)
 ```
 
 **Pluggability:** because `Cursor` is an interface, users can plug in alternatives — Redis-backed, SQL-backed, Consul KV, etc. The library ships file + memory; everything else is BYO.
@@ -680,7 +688,7 @@ WithFileMode(os.FileMode)         // default 0o600
 
 `tail.WithFlock(lockPath string)` is a `FileCursorOption`. When set:
 
-1. On `NewFileCursor`, open `lockPath` with `O_CREATE | O_RDWR`, mode `0o600`.
+1. On `NewFileCursor`, open `lockPath` with `O_CREATE | O_RDWR | O_NOFOLLOW`, mode `0o600`. Refuse to follow a pre-positioned symlink (§11.4 #2). Reject construction when `lockPath` equals the cursor path (§11.4 #7).
 2. Call `syscall.Flock(fd, LOCK_EX | LOCK_NB)` (Unix) or `LockFileEx` with `LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY` (Windows).
 3. On lock failure, return `ErrLockHeld` wrapped in a descriptive error (`fmt.Errorf("lock held on %s: %w", lockPath, ErrLockHeld)`).
 4. On `Close`, the file descriptor is closed; the OS releases the lock automatically.
@@ -1528,6 +1536,24 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    to v2.1. Actual code recognises `.gz` variants in both `Lumberjack` and
    `Logrotate` and surfaces them via the skip-hook (see point 2 above).
    *Driver:* [CODE_REVIEW §4](./reviews/CODE_REVIEW.md) — same finding as point 2.
+9. **`tail.Options.OnInodeMismatch` hook.** Plan §4 L2 Options list omitted
+   any inode-mismatch hook. The shipped surface adds an observation
+   callback so embedders can wire alerting without parsing logs; fires
+   before the `AllowInodeMismatch` policy decision.
+   *Driver:* Pre-review (shipped alongside the inode-anchor hardening; see
+   §11.5).
+10. **`forward.Options.MaxAttempts int`.** Plan §4 L3 lines 442-443 said
+    transient sink errors retry "indefinitely (or until ctx)". Adding
+    `MaxAttempts` (zero-value 0 = unlimited, preserves plan behaviour) lets
+    callers bound the retry surface — closes ID-4 from
+    [verified-findings-2026-05-04 §ID-4](./reviews/verified-findings-2026-05-04.md).
+    *Driver:* [verified-findings-2026-05-04 §ID-4](./reviews/verified-findings-2026-05-04.md).
+11. **`tail.Options.RequireCursor bool`.** New opt-in safety flag: `New`
+    returns an error when `RequireCursor` is true and `Cursor` is nil. Plan
+    §4 L2 has Cursor-nil silently disable checkpointing; this preserves
+    that default but lets callers fail loudly on a missing cursor (e.g.,
+    YAML mapper bug).
+    *Driver:* [verified-findings-2026-05-04 §SE-7](./reviews/verified-findings-2026-05-04.md).
 
 ### 11.4 Subtle semantic deviations
 
@@ -1548,6 +1574,75 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    each Watcher event.
    *Driver:* Pre-review (design-time choice; Position() reflects the
    post-yield invariant the cursor commits against).
+3. **`Whence == io.SeekCurrent` rejected.** Plan §4 L1 line 225 listed it
+   as a valid value alongside `SeekStart` and `SeekEnd`, but no Watcher
+   has handler for it — it silently fell through to `SeekStart` (full-file
+   replay). `tail.New`, `watch.NewPolling`, and `watch.NewFsnotify` now
+   reject it explicitly with an "invalid Whence" error.
+   *Driver:* [verified-findings-2026-05-04 §SE-3](./reviews/verified-findings-2026-05-04.md).
+4. **`BackoffJitter` has no implicit default.** Plan §4 L3 line 471 said
+   `0..1, default 0.2`; the shipped code rewrote `0 → 0.2` in `New`, which
+   made the documented "0 = deterministic" behaviour unreachable. The fix
+   removes the silent rewrite. New contract: 0 (the zero value) is
+   deterministic; callers wanting the conventional ±20% jitter set 0.2
+   explicitly.
+   *Driver:* [verified-findings-2026-05-04 §SE-1](./reviews/verified-findings-2026-05-04.md).
+5. **Negative `tail.Options.Interval` rejected.** Plan §4 L1 line 224 said
+   `0 = 1s default`; `tail.New` previously also coerced negative values to
+   1s. Now negatives return an error from `tail.New`; only zero defaults.
+   *Driver:* [verified-findings-2026-05-04 §SE-11](./reviews/verified-findings-2026-05-04.md).
+6. **Inode-mismatch default is fail-safe (`AllowInodeMismatch=false`).** The
+   §11.3-#? `FailOnInodeMismatch bool` field has been replaced by the
+   inverted `AllowInodeMismatch bool`. Default behaviour: `tail.New` and
+   `watch.NewPolling` return an error wrapping `ErrInodeMismatch` when the
+   cursor's path exists with a different inode. Callers wanting the prior
+   warn-and-resume behaviour set `AllowInodeMismatch: true`. The
+   `OnMissingCheckpoint` policy is consulted only when the mismatch is
+   allowed — otherwise the error short-circuits before policy.
+   *Driver:* [verified-findings-2026-05-04 §ID-3](./reviews/verified-findings-2026-05-04.md).
+7. **`WithFlock(lockPath)` rejects `lockPath == cursorPath`.** Plan §5.4
+   documented the hazard ("renaming over an open, locked file would lose
+   the lock") but `NewFileCursor` did not enforce it; two cooperating
+   processes following the documented "use WithFlock" pattern with the
+   cursor as the lock path would both believe they held an exclusive lock.
+   `NewFileCursor` now compares `filepath.Clean(o.flockPath)` against
+   `filepath.Clean(path)` and errors on equality.
+   *Driver:* [verified-findings-2026-05-04 §SE-2](./reviews/verified-findings-2026-05-04.md).
+8. **`WithFileMode` validates the mode bits.** Plan §5.3 specifies only
+   the default `0o600` and is silent on validation. `NewFileCursor` now
+   rejects modes with group-write (`0o020`), world-write (`0o002`), or
+   special bits (setuid/setgid/sticky) — these defeat the cursor's
+   integrity guarantees in shared-FS deployments.
+   *Driver:* [verified-findings-2026-05-04 §SE-8](./reviews/verified-findings-2026-05-04.md).
+9. **`WithSyncBackgroundInterval` requires `WithSyncMode(SyncBackground)`.**
+   Plan §4 L2 line 331 listed the option without a coupling constraint;
+   the consumer in `NewFileCursor` only reads `o.syncInterval` inside the
+   `SyncBackground` branch, so an interval set without the mode was dead
+   config. `NewFileCursor` now errors on the misconfiguration so the
+   caller catches the bug at construction time.
+   *Driver:* [verified-findings-2026-05-04 §SE-10](./reviews/verified-findings-2026-05-04.md).
+10. **`Decoder` returning a wrapped `ErrPermanent` aborts `Run`.** Plan §4
+    L3 line 452 said decode errors "advance past the line"; the shipped
+    decoders.go godoc claims `ErrPermanent` aborts. `Forwarder.Run` now
+    honours that godoc: when `errors.Is(derr, ErrPermanent)` is true the
+    cursor does *not* advance and `Run` returns the wrapping error.
+    *Driver:* [verified-findings-2026-05-04 §SE-9](./reviews/verified-findings-2026-05-04.md).
+11. **Cursor tmp + flock open use `O_NOFOLLOW` (Unix) / reparse-point
+    refusal (Windows).** Plan §5.2 line 593 says v2 *follows symlinks*
+    when tailing log files (we tail the target, not the link). That policy
+    applies only to the read path; the cursor's `<path>.tmp` and the
+    flock's `<lockPath>` are write paths the library owns and must not
+    redirect through symlinks. `internal/atomicwrite/openTmp_unix.go` adds
+    `O_EXCL|O_NOFOLLOW` plus a stale-tmp pre-removal step;
+    `tail/flock_unix.go` adds `O_NOFOLLOW`; the Windows variants refuse
+    reparse points via `os.Lstat` before opening.
+    *Driver:* [verified-findings-2026-05-04 §ID-1, §ID-2](./reviews/verified-findings-2026-05-04.md).
+12. **Negative `forward.Options` batch limits rejected.** Plan §4 L3 lines
+    464-466 specified the three batch-bound fields without ranges; the
+    validator only checked the all-zero case. `forward.New` now also
+    rejects `MaxBatchRecords < 0`, `MaxBatchBytes < 0`, and
+    `MaxBatchAge < 0`.
+    *Driver:* [verified-findings-2026-05-04 §SE-4](./reviews/verified-findings-2026-05-04.md).
 
 ### 11.5 Plan-vs-shipped impact summary
 
@@ -1577,12 +1672,25 @@ deltas are:
 - **Compressed-backup behaviour is partial** (§11.3 #2, §11.3 #9):
   detection-and-skip ships, decompression does not. A checkpoint pointing
   at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy.
-- **`ErrInodeMismatch` now reachable**: re-exported as `tail.ErrInodeMismatch`,
-  fired from `tail.New` when the cursor's path still exists with a different
-  inode. `Options.OnInodeMismatch` observes the event; `Options.FailOnInodeMismatch`
-  promotes it to a `tail.New` error wrapping the sentinel. The watcher
-  config also exposes `Config.OnInodeMismatch` and `Config.FailOnInodeMismatch`
-  for direct watch users.
+- **`ErrInodeMismatch` is the fail-safe default**: re-exported as
+  `tail.ErrInodeMismatch`, returned from `tail.New` when the cursor's path
+  still exists with a different inode (§11.4 #6). `Options.OnInodeMismatch`
+  observes the event; `Options.AllowInodeMismatch=true` opts out of the
+  default error and falls through to `OnMissingCheckpoint` policy. The
+  watcher config exposes the same pair as `Config.OnInodeMismatch` and
+  `Config.AllowInodeMismatch` for direct watch users.
+- **Hardening cluster (verified-findings 2026-05-04).** A bundle of
+  validator/symlink-safety changes landed together and shifts §4 surfaces
+  in small but non-trivial ways. Each item links to its own §11 entry:
+  rejected `Whence == io.SeekCurrent` (§11.4 #3), `BackoffJitter` no
+  longer auto-defaults to 0.2 (§11.4 #4), `Interval < 0` rejected
+  (§11.4 #5), inode-mismatch fail-safe default (§11.4 #6), `WithFlock`
+  rejects same-as-cursor path (§11.4 #7), `WithFileMode` rejects unsafe
+  modes (§11.4 #8), `WithSyncBackgroundInterval` requires the matching
+  mode (§11.4 #9), Decoder `ErrPermanent` aborts (§11.4 #10), `O_NOFOLLOW`
+  on cursor tmp + flock open (§11.4 #11), negative batch limits rejected
+  (§11.4 #12), plus new fields `RequireCursor` (§11.3 #11) and
+  `MaxAttempts` (§11.3 #10).
 - **`forward.Options.OnDropped` intentionally absent at L3.** File drops
   happen inside `Tailer` (during `openFile`/`OnMissingCheckpoint`) before
   records reach the `Forwarder`. The L3 layer has no surface to detect

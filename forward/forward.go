@@ -67,12 +67,15 @@ type Options[T any] struct {
 	InitialBackoff time.Duration // first retry sleep; default 100ms
 	MaxBackoff     time.Duration // backoff ceiling; default 30s
 	// BackoffJitter controls the fraction of the ceiling used for jitter.
-	// Must be in [0, 1]. 0 = deterministic (always ceiling). 1 = full jitter
-	// (current behaviour, rand in [0, ceiling)). Default is 0.2 (±20% around
-	// 0.8×ceiling). Negative or >1 is rejected by [New].
+	// Must be in [0, 1]. 0 = deterministic (always ceiling, the zero-value
+	// default). 1 = full jitter (rand in [0, ceiling)). 0.2 = ±20% around
+	// 0.8×ceiling. Negative or >1 is rejected by [New]. There is no implicit
+	// default — set 0.2 explicitly for the conventional ±20% jitter.
 	BackoffJitter float64
 	// MaxAttempts is the maximum number of Sink.Send calls per batch before
-	// Run gives up and returns an error. 0 means no limit (current default).
+	// Run gives up and returns an error wrapping [ErrMaxAttempts]. 0 (the
+	// zero-value default) means no limit; retries continue until ctx
+	// cancellation or a permanent sink error.
 	MaxAttempts int
 
 	Logger *slog.Logger
@@ -111,14 +114,27 @@ func New[T any](opts Options[T]) (*Forwarder[T], error) {
 	if opts.Sink == nil {
 		return nil, errors.New("forward: Options.Sink must not be nil")
 	}
+	// SE-4: reject negative batch limits explicitly (the prior `== 0` check
+	// silently accepted negatives, which then disabled flushing in the
+	// consumer because every guard is `> 0`).
+	if opts.MaxBatchRecords < 0 {
+		return nil, fmt.Errorf("forward: MaxBatchRecords must not be negative, got %d", opts.MaxBatchRecords)
+	}
+	if opts.MaxBatchBytes < 0 {
+		return nil, fmt.Errorf("forward: MaxBatchBytes must not be negative, got %d", opts.MaxBatchBytes)
+	}
+	if opts.MaxBatchAge < 0 {
+		return nil, fmt.Errorf("forward: MaxBatchAge must not be negative, got %v", opts.MaxBatchAge)
+	}
 	if opts.MaxBatchRecords == 0 && opts.MaxBatchBytes == 0 && opts.MaxBatchAge == 0 {
 		return nil, errors.New("forward: at least one of MaxBatchRecords, MaxBatchBytes, MaxBatchAge must be set")
 	}
 	if opts.BackoffJitter < 0 || opts.BackoffJitter > 1 {
 		return nil, fmt.Errorf("forward: BackoffJitter must be in [0, 1], got %g", opts.BackoffJitter)
 	}
-	if opts.BackoffJitter == 0 {
-		opts.BackoffJitter = 0.2
+	// SE-1: no implicit default for BackoffJitter — 0 means deterministic.
+	if opts.MaxAttempts < 0 {
+		return nil, fmt.Errorf("forward: MaxAttempts must not be negative, got %d", opts.MaxAttempts)
 	}
 	if opts.InitialBackoff <= 0 {
 		opts.InitialBackoff = 100 * time.Millisecond
@@ -227,6 +243,13 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 			if f.opts.OnDecodeError != nil {
 				f.opts.OnDecodeError(rec.Line, rec.Pos, derr)
 			}
+			// SE-9: a Decoder may wrap ErrPermanent to abort Run on
+			// schema breakage rather than skip-and-advance. The cursor
+			// must NOT advance past the rejected record (no
+			// batchLastPos update before the early return).
+			if errors.Is(derr, ErrPermanent) {
+				return fmt.Errorf("forward: permanent decoder error: %w", derr)
+			}
 			batchLastPos = rec.Pos
 			continue
 		}
@@ -273,6 +296,15 @@ func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, bytes int, 
 				f.opts.OnSendError(err, attempt, false)
 			}
 			return fmt.Errorf("forward: permanent sink error: %w", err)
+		}
+		// ID-4: bound the retry loop when MaxAttempts is set. attempt is
+		// 0-based, so attempt+1 is the count of Send calls completed; once
+		// it reaches MaxAttempts there are no more attempts to make.
+		if f.opts.MaxAttempts > 0 && attempt+1 >= f.opts.MaxAttempts {
+			if f.opts.OnSendError != nil {
+				f.opts.OnSendError(err, attempt, false)
+			}
+			return fmt.Errorf("forward: gave up after %d attempts: %w", attempt+1, err)
 		}
 		if f.opts.OnSendError != nil {
 			f.opts.OnSendError(err, attempt, true)

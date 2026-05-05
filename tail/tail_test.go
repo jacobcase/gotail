@@ -127,6 +127,7 @@ func TestTailer_MissingCheckpoint_Fail(t *testing.T) {
 		Source:              tail.SingleFile(path),
 		Cursor:              cur,
 		Interval:            10 * time.Millisecond,
+		AllowInodeMismatch:  true, // fall through to OnMissingCheckpoint policy
 		OnMissingCheckpoint: tail.Fail,
 	})
 	if err != tail.ErrCheckpointMissing {
@@ -230,11 +231,11 @@ func TestTailer_NoInodeCheck_FallbackWhenPathGone(t *testing.T) {
 	}
 }
 
-// TestTailer_FailOnInodeMismatch_ReturnsSentinel pins the §3 ext-row
-// requirement that ErrInodeMismatch is reachable as a public sentinel.
-// When the cursor's named file still exists but has a different inode
-// (rotation reused the path), FailOnInodeMismatch returns the sentinel.
-func TestTailer_FailOnInodeMismatch_ReturnsSentinel(t *testing.T) {
+// TestTailer_InodeMismatch_FailsByDefault pins the §3 ext-row requirement
+// that ErrInodeMismatch is reachable as a public sentinel. With the
+// fail-safe default, an inode-mismatched cursor causes New to return the
+// sentinel without any opt-in.
+func TestTailer_InodeMismatch_FailsByDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rot.log")
 	if err := os.WriteFile(path, []byte("data\n"), 0o644); err != nil {
@@ -248,10 +249,10 @@ func TestTailer_FailOnInodeMismatch_ReturnsSentinel(t *testing.T) {
 	_ = cur.Save(context.Background(), tail.Checkpoint{Pos: stalePos})
 
 	_, err := tail.New(context.Background(), tail.Options{
-		Source:              tail.SingleFile(path),
-		Cursor:              cur,
-		Interval:            10 * time.Millisecond,
-		FailOnInodeMismatch: true,
+		Source:   tail.SingleFile(path),
+		Cursor:   cur,
+		Interval: 10 * time.Millisecond,
+		// AllowInodeMismatch unset → default fail-safe.
 	})
 	if !errors.Is(err, tail.ErrInodeMismatch) {
 		t.Fatalf("New: want tail.ErrInodeMismatch, got %v", err)
@@ -259,8 +260,8 @@ func TestTailer_FailOnInodeMismatch_ReturnsSentinel(t *testing.T) {
 }
 
 // TestTailer_OnInodeMismatch_HookFires confirms the observation hook fires
-// when the cursor's path exists with a different inode, regardless of
-// FailOnInodeMismatch (which controls only the failure decision).
+// when the cursor's path exists with a different inode, in the
+// AllowInodeMismatch=true (resume) path.
 func TestTailer_OnInodeMismatch_HookFires(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hook.log")
@@ -278,6 +279,7 @@ func TestTailer_OnInodeMismatch_HookFires(t *testing.T) {
 		Source:              tail.SingleFile(path),
 		Cursor:              cur,
 		Interval:            10 * time.Millisecond,
+		AllowInodeMismatch:  true,             // opt out of fail-safe default
 		OnMissingCheckpoint: tail.SkipToActive, // force success past mismatch
 		OnInodeMismatch: func(want, got uint64) {
 			hookCalls++
@@ -315,6 +317,7 @@ func TestTailer_MissingCheckpoint_SkipToActive(t *testing.T) {
 		Cursor:              cur,
 		Interval:            10 * time.Millisecond,
 		StopAtEOF:           true,
+		AllowInodeMismatch:  true, // fall through to OnMissingCheckpoint policy
 		OnMissingCheckpoint: tail.SkipToActive,
 	}
 	tr := mustNew(t, opts)
@@ -1624,9 +1627,9 @@ func TestNew_RequireCursor_NilErrors(t *testing.T) {
 	}
 }
 
-// TestNew_FailOnInodeMismatch_DefaultEnabled (ID-3): FailOnInodeMismatch must
-// default to true (fail-safe). With default Options an inode swap must cause
-// New to return an error wrapping ErrInodeMismatch.
+// TestNew_FailOnInodeMismatch_DefaultEnabled (ID-3): the default behaviour
+// (AllowInodeMismatch=false) must fail-safe. With default Options an inode
+// swap must cause New to return an error wrapping ErrInodeMismatch.
 func TestNew_FailOnInodeMismatch_DefaultEnabled(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")

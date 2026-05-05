@@ -336,7 +336,7 @@ func TestWithFileMode_RejectsUnsafeModes(t *testing.T) {
 		mode os.FileMode
 	}{
 		{"world-writable", 0o666},
-		{"group-writable", 0o610},
+		{"group-writable", 0o660},
 		{"world-and-group-writable", 0o622},
 		{"setuid", 0o4600},
 		{"setgid", 0o2600},

@@ -374,6 +374,8 @@ func TestRotation_NewFileStartsAtZero(t *testing.T) {
 // TestPollWatcher_ResumeInodeMismatch_Warns pins the contract that a Resume
 // whose inode does not match the on-disk file is dropped (offset reset to 0)
 // AND surfaced as a Warn log so the data-loss-adjacent fallback is visible.
+// AllowInodeMismatch is the explicit opt-in to this resume path; the
+// fail-safe default would error here (see _Fails test below).
 func TestPollWatcher_ResumeInodeMismatch_Warns(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mismatch.log")
@@ -384,10 +386,11 @@ func TestPollWatcher_ResumeInodeMismatch_Warns(t *testing.T) {
 
 	resume := watch.Position{File: path, Inode: 1, Offset: 3} // inode deliberately wrong
 	w, err := watch.NewPolling(watch.Config{
-		Path:     path,
-		Interval: 10 * time.Millisecond,
-		Resume:   &resume,
-		Logger:   lg,
+		Path:               path,
+		Interval:           10 * time.Millisecond,
+		Resume:             &resume,
+		AllowInodeMismatch: true,
+		Logger:             lg,
 	})
 	if err != nil {
 		t.Fatalf("NewPolling: %v", err)
@@ -411,20 +414,19 @@ func TestPollWatcher_ResumeInodeMismatch_Warns(t *testing.T) {
 	}
 }
 
-// TestPollWatcher_ResumeInodeMismatch_FailsWhenConfigured pins the
-// FailOnInodeMismatch contract: Wait returns an error wrapping
-// ErrInodeMismatch instead of falling through to offset 0.
-func TestPollWatcher_ResumeInodeMismatch_FailsWhenConfigured(t *testing.T) {
+// TestPollWatcher_ResumeInodeMismatch_FailsByDefault pins the fail-safe
+// default contract: Wait returns an error wrapping ErrInodeMismatch instead
+// of falling through to offset 0. Opt out by setting AllowInodeMismatch.
+func TestPollWatcher_ResumeInodeMismatch_FailsByDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fail.log")
 	writeFile(t, path, "hello\n")
 
 	resume := watch.Position{File: path, Inode: 1, Offset: 3}
 	w, err := watch.NewPolling(watch.Config{
-		Path:                path,
-		Interval:            10 * time.Millisecond,
-		Resume:              &resume,
-		FailOnInodeMismatch: true,
+		Path:     path,
+		Interval: 10 * time.Millisecond,
+		Resume:   &resume,
 	})
 	if err != nil {
 		t.Fatalf("NewPolling: %v", err)
@@ -441,6 +443,7 @@ func TestPollWatcher_ResumeInodeMismatch_FailsWhenConfigured(t *testing.T) {
 
 // TestPollWatcher_OnInodeMismatch_HookFires confirms the observation hook
 // fires regardless of the resolution path (default fallback or fail).
+// AllowInodeMismatch=true selects the resume path so Wait succeeds.
 func TestPollWatcher_OnInodeMismatch_HookFires(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hook.log")
@@ -450,9 +453,10 @@ func TestPollWatcher_OnInodeMismatch_HookFires(t *testing.T) {
 	var hookWant, hookGot uint64
 	hookCalls := 0
 	w, err := watch.NewPolling(watch.Config{
-		Path:     path,
-		Interval: 10 * time.Millisecond,
-		Resume:   &resume,
+		Path:               path,
+		Interval:           10 * time.Millisecond,
+		Resume:             &resume,
+		AllowInodeMismatch: true,
 		OnInodeMismatch: func(want, got uint64) {
 			hookWant, hookGot = want, got
 			hookCalls++

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -187,6 +188,24 @@ func NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error) {
 	}
 	for _, fn := range opts {
 		fn(&o)
+	}
+	// SE-8: WithFileMode must not accept group/world-writable or special
+	// (setuid/setgid/sticky) bits. The default 0o600 is the primary control;
+	// validation here keeps the option from defeating it.
+	if o.fileMode&0o022 != 0 || o.fileMode&^os.FileMode(0o777) != 0 {
+		return nil, fmt.Errorf("tail: WithFileMode(%04o) is unsafe: must not have group/world-write or special bits", o.fileMode)
+	}
+	// SE-2: flockPath must differ from the cursor path; otherwise the
+	// rename-over-open in atomicwrite.Write orphans the held flock fd on
+	// the first Save and silently breaks mutual exclusion.
+	if o.flockPath != "" && filepath.Clean(o.flockPath) == filepath.Clean(path) {
+		return nil, fmt.Errorf("tail: WithFlock path %q must differ from cursor path %q (rename-over-open would orphan the lock)", o.flockPath, path)
+	}
+	// SE-10: WithSyncBackgroundInterval is only meaningful for SyncBackground
+	// mode; reject the misconfiguration so the dead-config is caught at
+	// construction time rather than silently ignored.
+	if o.syncInterval != 0 && o.syncMode != SyncBackground {
+		return nil, errors.New("tail: WithSyncBackgroundInterval requires WithSyncMode(SyncBackground)")
 	}
 	c := &FileCursor{path: path, opts: o}
 	if o.flockPath != "" {
