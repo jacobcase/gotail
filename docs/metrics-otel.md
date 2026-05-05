@@ -6,6 +6,7 @@ all wiring is in your application code.
 ```go
 import (
     "context"
+    "time"
 
     "go.opentelemetry.io/otel"
     "go.opentelemetry.io/otel/metric"
@@ -15,11 +16,13 @@ import (
 
 type Metrics struct {
     linesProcessed metric.Int64Counter
+    bytesShipped   metric.Int64Counter
     rotations      metric.Int64Counter
     truncations    metric.Int64Counter
     batchesSent    metric.Int64Counter
     sendErrors     metric.Int64Counter
     decodeErrors   metric.Int64Counter
+    sendLatency    metric.Float64Histogram
 }
 
 func NewMetrics() (*Metrics, error) {
@@ -29,6 +32,10 @@ func NewMetrics() (*Metrics, error) {
 
     if m.linesProcessed, err = meter.Int64Counter("gotail.lines_processed",
         metric.WithDescription("Total lines read")); err != nil {
+        return nil, err
+    }
+    if m.bytesShipped, err = meter.Int64Counter("gotail.bytes_shipped",
+        metric.WithDescription("Bytes (sum of raw line lengths) delivered to sink")); err != nil {
         return nil, err
     }
     if m.rotations, err = meter.Int64Counter("gotail.rotations",
@@ -51,6 +58,10 @@ func NewMetrics() (*Metrics, error) {
         metric.WithDescription("Lines skipped due to decode errors")); err != nil {
         return nil, err
     }
+    if m.sendLatency, err = meter.Float64Histogram("gotail.send_latency_seconds",
+        metric.WithDescription("Latency of successful Sink.Send calls")); err != nil {
+        return nil, err
+    }
     return m, nil
 }
 
@@ -63,9 +74,11 @@ func (m *Metrics) TailerOpts(base tail.Options) tail.Options {
 
 func (m *Metrics) ForwarderOpts[T any](base forward.Options[T]) forward.Options[T] {
     ctx := context.Background()
-    base.OnBatchSent = func(n int, _ forward.Position) {
+    base.OnBatchSent = func(records, bytes int, _ forward.Position, latency time.Duration) {
         m.batchesSent.Add(ctx, 1)
-        m.linesProcessed.Add(ctx, int64(n))
+        m.linesProcessed.Add(ctx, int64(records))
+        m.bytesShipped.Add(ctx, int64(bytes))
+        m.sendLatency.Record(ctx, latency.Seconds())
     }
     base.OnSendError = func(_ error, _ int, _ bool) { m.sendErrors.Add(ctx, 1) }
     base.OnDecodeError = func(_ []byte, _ forward.Position, _ error) {

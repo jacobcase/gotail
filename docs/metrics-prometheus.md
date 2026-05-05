@@ -5,6 +5,8 @@ on the Prometheus client — all wiring is in your application code.
 
 ```go
 import (
+    "time"
+
     "github.com/prometheus/client_golang/prometheus"
     "github.com/prometheus/client_golang/prometheus/promauto"
     "github.com/jacobcase/gotail/v2/tail"

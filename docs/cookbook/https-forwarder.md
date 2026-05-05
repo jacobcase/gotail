@@ -22,6 +22,8 @@ import (
 )
 
 func main() {
+    ctx := context.Background()
+
     // ── TLS config ──────────────────────────────────────────────────────
     cert, err := tls.LoadX509KeyPair("client.crt", "client.key")
     if err != nil {
@@ -47,7 +49,7 @@ func main() {
         os.Exit(1)
     }
 
-    tr, err := tail.New(tail.Options{
+    tr, err := tail.New(ctx, tail.Options{
         Source: tail.Lumberjack("/var/log/app.log"),
         Cursor: cur,
         Logger: slog.Default(),
@@ -93,8 +95,10 @@ func main() {
         InitialBackoff:  200 * time.Millisecond,
         MaxBackoff:      60 * time.Second,
         Logger:          slog.Default(),
-        OnBatchSent: func(n int, pos tail.Position) {
-            slog.Info("batch sent", "records", n, "offset", pos.Offset)
+        OnBatchSent: func(records, bytes int, pos tail.Position, latency time.Duration) {
+            slog.Info("batch sent",
+                "records", records, "bytes", bytes,
+                "offset", pos.Offset, "latency_ms", latency.Milliseconds())
         },
         OnSendError: func(err error, attempt int, willRetry bool) {
             slog.Warn("send error", "attempt", attempt, "willRetry", willRetry, "err", err)
@@ -105,7 +109,6 @@ func main() {
         os.Exit(1)
     }
 
-    ctx := context.Background()
     if err := fwd.Run(ctx); err != nil {
         slog.Error("forwarder stopped", "err", err)
         os.Exit(1)

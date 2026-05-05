@@ -327,9 +327,9 @@ func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, bytes int, 
 
 // jitteredBackoff returns a jitter-scaled duration for the given attempt.
 // The jitter factor is BackoffJitter (0..1):
-//   - 0 → deterministic, always returns ceiling.
+//   - 0 → deterministic, always returns ceiling (zero-value default).
 //   - 1 → full jitter, rand in [0, ceiling).
-//   - 0.2 (default) → rand in [0.8·ceiling, ceiling).
+//   - 0.2 → rand in [0.8·ceiling, ceiling) (conventional ±20%).
 func (f *Forwarder[T]) jitteredBackoff(attempt int) time.Duration {
 	shift := attempt
 	if shift > 62 {

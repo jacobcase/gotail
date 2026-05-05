@@ -45,7 +45,7 @@ go get github.com/jacobcase/gotail/v2
 ## Quick start — live tail
 
 ```go
-tr, err := tail.New(tail.Options{
+tr, err := tail.New(ctx, tail.Options{
     Source:   tail.SingleFile("/var/log/app.log"),
     Interval: time.Second,
     Whence:   io.SeekEnd, // start at current end
@@ -65,7 +65,7 @@ for rec, err := range tr.Records(ctx) {
 cur, err := tail.NewFileCursor("/var/run/app.cursor")
 if err != nil { ... }
 
-tr, err := tail.New(tail.Options{
+tr, err := tail.New(ctx, tail.Options{
     Source: tail.SingleFile("/var/log/app.log"),
     Cursor: cur,
 })
@@ -82,7 +82,7 @@ for rec, err := range tr.Records(ctx) {
 ## Quick start — multi-file log series (lumberjack rotation)
 
 ```go
-tr, err := tail.New(tail.Options{
+tr, err := tail.New(ctx, tail.Options{
     Source:    tail.Lumberjack("/var/log/app.log"),
     StopAtEOF: true, // drain archived files then return nil from Run
 })
@@ -99,7 +99,7 @@ for rec, err := range tr.Records(ctx) {
 ## Quick start — forward to HTTP sink
 
 ```go
-tr, err := tail.New(tail.Options{Source: tail.SingleFile("/var/log/app.log")})
+tr, err := tail.New(ctx, tail.Options{Source: tail.SingleFile("/var/log/app.log")})
 if err != nil { ... }
 defer tr.Close()
 
@@ -119,7 +119,7 @@ if err := fwd.Run(ctx); err != nil { ... }
 
 | v1 concept | v2 equivalent |
 |-----------|---------------|
-| `gotail.NewPoller(path)` → `io.ReadCloser` | `tail.New(opts)` → `*Tailer` |
+| `gotail.NewPoller(path)` → `io.ReadCloser` | `tail.New(ctx, opts)` → `*Tailer` |
 | Manual rotation (v1 did not survive rename) | Automatic; `OnRotated` hook available |
 | No checkpoints | `tail.FileCursor` / `tail.MemoryCursor` |
 | No line framing | `watch.LineReader` (used internally by Tailer) |

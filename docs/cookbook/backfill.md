@@ -16,9 +16,11 @@ import (
 )
 
 func main() {
+    ctx := context.Background()
+
     // Lumberjack discovers all rotated files alongside the active log and
     // sorts them oldest-first so the Tailer replays history in order.
-    tr, err := tail.New(tail.Options{
+    tr, err := tail.New(ctx, tail.Options{
         Source:    tail.Lumberjack("/var/log/app.log"),
         StopAtEOF: true,
         Logger:    slog.Default(),
@@ -32,7 +34,6 @@ func main() {
     }
     defer tr.Close()
 
-    ctx := context.Background()
     var count int
     for rec, err := range tr.Records(ctx) {
         if err != nil {
@@ -55,7 +56,7 @@ Add a `FileCursor` so a restart picks up where it left off:
 ```go
 cur, _ := tail.NewFileCursor("/var/run/backfill.cursor")
 
-tr, err := tail.New(tail.Options{
+tr, err := tail.New(ctx, tail.Options{
     Source:    tail.Lumberjack("/var/log/app.log"),
     Cursor:    cur,
     StopAtEOF: true,
