@@ -58,9 +58,13 @@ type Cursor interface {
 }
 
 // Syncer is an extension interface optionally implemented by [Cursor] values.
-// [FileCursor] implements Syncer when configured with [SyncOnCommit] or
-// [SyncBackground]. [Tailer.Commit] calls only [Cursor.Save]; the caller
-// controls flushing by type-asserting to Syncer and calling Sync.
+// [*FileCursor] always satisfies Syncer, but Sync only has work to do when
+// the cursor is configured with [SyncOnCommit] or [SyncBackground]; in
+// [SyncAlways] mode every Save already fsyncs and Sync is a no-op.
+//
+// [Tailer.Commit] calls only [Cursor.Save]; the caller controls flushing by
+// type-asserting the value returned from [NewFileCursor] to Syncer and
+// calling Sync.
 type Syncer interface {
 	// Sync flushes any buffered checkpoint to disk. It is a no-op when no
 	// checkpoint is buffered (i.e. after construction or after the previous
@@ -138,7 +142,10 @@ func WithSyncMode(m SyncMode) FileCursorOption {
 
 // WithSyncBackgroundInterval overrides the flush interval used by
 // [SyncBackground]. Zero or negative values use [DefaultSyncBackgroundInterval].
-// Ignored when the sync mode is not [SyncBackground].
+//
+// Setting a non-zero interval without also setting [WithSyncMode]([SyncBackground])
+// is a configuration error: [NewFileCursor] returns an error rather than
+// silently ignoring the value.
 func WithSyncBackgroundInterval(d time.Duration) FileCursorOption {
 	return func(o *fileCursorOpts) { o.syncInterval = d }
 }
@@ -157,8 +164,9 @@ const maxRawMetaBytes = 64 * 1024
 // FileCursor atomically persists checkpoints to a JSON file using a
 // write-to-tmp + fsync + rename sequence.
 //
-// When configured with [SyncOnCommit] or [SyncBackground], FileCursor
-// implements the [Syncer] extension interface.
+// [NewFileCursor] returns this value as the [Cursor] interface. To call
+// [FileCursor.Sync] (relevant under [SyncOnCommit] / [SyncBackground]) the
+// caller type-asserts the [Cursor] to [Syncer].
 type FileCursor struct {
 	path string
 	opts fileCursorOpts
@@ -347,14 +355,15 @@ func (c *FileCursor) Close() error {
 	return nil
 }
 
-// MemoryCursor is an in-memory [Cursor] for tests.
+// memoryCursor is the in-memory implementation behind [NewMemoryCursor].
 type memoryCursor struct {
 	mu   sync.Mutex
 	cp   Checkpoint
 	have bool
 }
 
-// NewMemoryCursor returns an in-memory [Cursor] suitable for tests.
+// NewMemoryCursor returns an in-memory [Cursor] suitable for tests. State
+// lives only in the returned value; nothing is persisted across processes.
 func NewMemoryCursor() Cursor {
 	return &memoryCursor{}
 }

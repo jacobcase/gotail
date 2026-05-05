@@ -14,11 +14,12 @@
 // # Modes
 //
 // Live tail (default): the [Tailer] follows the file indefinitely, surviving
-// rotation and truncation. Call Close to stop.
+// rotation and truncation. Call [Tailer.Close] to stop, or use
+// [Tailer.CloseWithFlush] to commit the current position before tearing down.
 //
-// Backfill (StopAtEOF: true): the [Tailer] drains the file to end-of-file,
-// closes the [Done] channel, and subsequent [Tailer.Next] calls return
-// [ErrSourceExhausted].
+// Backfill ([Options.StopAtEOF] = true): the [Tailer] drains the file to
+// end-of-file, closes the [Tailer.Done] channel, and subsequent
+// [Tailer.Next] calls return [ErrSourceExhausted].
 //
 // # Cursor durability
 //
@@ -36,8 +37,10 @@
 //     strings (`json:"...,string"`). Many JSON consumers parse numbers as
 //     IEEE-754 doubles, which silently lose precision past 2^53. Quoting
 //     them preserves full int64 fidelity.
-//   - [Checkpoint.Version] is written as 1 today and validated on Load;
-//     bumping it requires migration support in future versions.
+//   - The on-disk file carries an internal "version" field — written as 1
+//     today and validated on [FileCursor.Load]. The field is private to the
+//     file format (not exposed on [Checkpoint]); bumping it requires a
+//     [CursorMigrator] supplied via [WithCursorMigration].
 //   - [Checkpoint.Meta] is opaque [json.RawMessage] passed through verbatim.
 //     Schema discipline for Meta is the caller's responsibility.
 //

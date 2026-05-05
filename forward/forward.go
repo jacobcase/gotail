@@ -12,8 +12,8 @@ import (
 )
 
 // Position is an alias for [tail.Position] so external implementations of
-// [Sink], [RecordSource], and [Cursor] do not need to import the tail
-// package just to handle positions.
+// [Sink] and [RecordSource] do not need to import the tail package just to
+// handle positions.
 type Position = tail.Position
 
 // Record is an alias for [tail.Record] for the same reason as [Position]:

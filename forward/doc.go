@@ -37,4 +37,29 @@
 // interfaces do not need to import the tail package directly. The aliases
 // are package-level types: forward.Record is the same type as tail.Record,
 // so values flow freely between the two packages.
+//
+// # Usage
+//
+//	tr, _ := tail.New(ctx, tail.Options{
+//	    Source:   tail.SingleFile("/var/log/app.log"),
+//	    Cursor:   cur,
+//	    Interval: time.Second,
+//	})
+//	defer tr.Close()
+//
+//	sink := forward.SinkFunc[[]byte](func(ctx context.Context, batch [][]byte) error {
+//	    return httpPost(ctx, batch)
+//	})
+//
+//	fwd, err := forward.New(forward.Options[[]byte]{
+//	    Source:          tr,
+//	    Decoder:         forward.IdentityDecoderCopy,
+//	    Sink:            sink,
+//	    MaxBatchRecords: 500,
+//	    MaxBatchAge:     5 * time.Second,
+//	    BackoffJitter:   0.2,
+//	})
+//	if err != nil { return err }
+//
+//	if err := fwd.Run(ctx); err != nil { /* permanent or ctx error */ }
 package forward

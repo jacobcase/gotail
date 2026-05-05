@@ -77,7 +77,7 @@ func WithLumberjackSkippedHook(fn func(path, reason string)) LumberjackOption {
 // when a checkpoint resume would target a backup that has already been
 // compressed and aged out of reach.
 //
-// [lumberjack v2]: https://github.com/natefinish/lumberjack
+// [lumberjack v2]: https://github.com/natefinch/lumberjack
 func Lumberjack(activePath string, opts ...LumberjackOption) Source {
 	s := &lumberjackSource{activePath: activePath}
 	for _, opt := range opts {
@@ -192,6 +192,10 @@ func matchLumberjackCompressed(n, prefix, ext string) bool {
 // you have ten or more backups (".10" sorts before ".2"). For logrotate's
 // default numeric naming use [Logrotate] instead; for time-suffixed names use
 // [Lumberjack].
+//
+// Glob does not deduplicate: if backupGlob also matches activePath, the path
+// will appear twice in the returned slice. Choose a pattern that excludes
+// activePath (e.g. "app.log.*" rather than "app.log*").
 func Glob(activePath, backupGlob string) Source {
 	return &globSource{activePath: activePath, backupGlob: backupGlob}
 }

@@ -52,8 +52,10 @@ type Config struct {
 	Path string
 	// Interval is the poll interval. Zero defaults to 1 second.
 	Interval time.Duration
-	// Whence is io.SeekStart, io.SeekCurrent, or io.SeekEnd. Applies only
-	// to the first file opened; subsequent files always start at offset 0.
+	// Whence is [io.SeekStart] or [io.SeekEnd]; any other value (including
+	// [io.SeekCurrent]) is rejected by the watcher constructors. Applies
+	// only to the first file opened; subsequent files always start at
+	// offset 0.
 	Whence int
 	// Resume, if non-nil, is an optional resume point subject to inode match.
 	Resume *Position

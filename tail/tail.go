@@ -58,7 +58,8 @@ type Options struct {
 	// (gotail_nofsnotify build tag, or unsupported OS).
 	ForcePolling bool
 	// Whence controls the initial seek position for the first file opened.
-	// Must be [io.SeekStart], [io.SeekCurrent], or [io.SeekEnd].
+	// Must be [io.SeekStart] or [io.SeekEnd]; [io.SeekCurrent] is rejected
+	// because there is no defined "current" position at construction time.
 	// Zero (io.SeekStart) reads from the beginning; [io.SeekEnd] skips
 	// existing content and tails only new data. Ignored when a Cursor
 	// provides a resume point.
