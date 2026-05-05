@@ -1,5 +1,9 @@
 # gotail v2
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/jacobcase/gotail/v2.svg)](https://pkg.go.dev/github.com/jacobcase/gotail/v2)
+[![CI](https://github.com/jacobcase/gotail/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jacobcase/gotail/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/jacobcase/gotail/branch/main/graph/badge.svg)](https://codecov.io/gh/jacobcase/gotail)
+
 A reliable, production-grade file tailing library for Go.
 
 ## Overview
@@ -162,8 +166,18 @@ go test -race ./...
 go test -race -tags gotail_nofsnotify ./...
 ```
 
+To generate a coverage profile (matches what CI uploads to Codecov):
+
+```
+go test -race -covermode=atomic -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out -o coverage.html   # browseable report
+go tool cover -func=coverage.out                     # per-function summary
+```
+
 CI runs both matrices on Linux, macOS, and Windows; goroutine leaks are
 caught at suite teardown via [goleak](https://github.com/uber-go/goleak).
+A separate `coverage` job uploads `coverage.out` as a build artifact and
+to [Codecov](https://codecov.io/gh/jacobcase/gotail).
 
 ## Docs
 
