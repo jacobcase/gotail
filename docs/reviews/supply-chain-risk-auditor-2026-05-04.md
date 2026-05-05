@@ -121,7 +121,7 @@ ideally bundled with the next `go.mod` housekeeping pass.
 
 2. **Optional: bump `github.com/fsnotify/fsnotify` to v1.10.1.** The new release
    landed on the day of this scan. Diff is small; review release notes before
-   merging since gotail leans on fsnotify behavior heavily (per `docs/V2_PLAN.md`).
+   merging since gotail leans on fsnotify behavior heavily (per `docs/v2-plan.md`).
 
 3. **No action on `goleak`, `testify`, `go-spew`, `go-difflib`, `yaml.v3`.**
    They are not on any code path that ships or runs in gotail's tests.

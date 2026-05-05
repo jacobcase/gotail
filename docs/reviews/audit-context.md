@@ -760,9 +760,9 @@ not load-bearing for runtime correctness:
 
 ---
 
-## 11. Drift from `V2_PLAN.md`
+## 11. Drift from `v2-plan.md`
 
-Moved to [`../V2_PLAN.md` §11 *Deviations*](../V2_PLAN.md#11-deviations) so the
+Moved to [`../v2-plan.md` §11 *Deviations*](../v2-plan.md#11-deviations) so the
 plan and the deltas live alongside each other. Plan-vs-shipped reasoning that
 used to live here now sits at the end of the design plan, with each deviation
 linked back to the review section that drove it.

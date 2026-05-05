@@ -2,7 +2,7 @@
 
 ## Design plan
 
-The v2 design plan lives at `docs/V2_PLAN.md`. The shipped code drifts
+The v2 design plan lives at `docs/v2-plan.md`. The shipped code drifts
 from the plan in places; track every divergence in the
 `## 11. Deviations` section at the end of the plan.
 
@@ -29,5 +29,5 @@ When running Trail of Bits security skills, write all findings reports to ./docs
 Each review starts with a **Conducted** date and (when closed) a
 **Closed** date in the header. New reviews go in the same directory
 following the same header convention. When a review's findings translate
-into deviations from `docs/V2_PLAN.md`, also record them in the plan's
+into deviations from `docs/v2-plan.md`, also record them in the plan's
 Deviations section with a link back to the review.
