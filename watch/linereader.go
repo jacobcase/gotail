@@ -228,7 +228,7 @@ func (l *LineReader) switchToFile(path string, pos Position) error {
 		l.f.Close()
 		l.f = nil
 	}
-	f, err := os.Open(path)
+	f, err := openShared(path)
 	if err != nil {
 		return fmt.Errorf("watch: open %s: %w", path, err)
 	}

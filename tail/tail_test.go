@@ -1659,12 +1659,17 @@ func TestNew_FailOnInodeMismatch_DefaultEnabled(t *testing.T) {
 	}
 	tr.Close()
 
-	// Rotate: remove the file and create a new one at the same path; the new
-	// file gets a different inode from the OS.
-	if err := os.Remove(path); err != nil {
+	// Rotate: write the replacement to a sibling path, then atomically
+	// rename it over the original. The sibling is allocated while `path`
+	// still holds the original inode, so it is guaranteed to land on a
+	// different inode. os.Remove + os.WriteFile is unsafe here because
+	// Linux ext4/tmpfs reuses freed inodes immediately, occasionally
+	// handing the new file the same inode the cursor recorded.
+	tmp := path + ".new"
+	if err := os.WriteFile(tmp, []byte("new-content\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("new-content\n"), 0o644); err != nil {
+	if err := os.Rename(tmp, path); err != nil {
 		t.Fatal(err)
 	}
 

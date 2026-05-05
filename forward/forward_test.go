@@ -54,18 +54,6 @@ func writeLines(t *testing.T, path string, lines []string) {
 	}
 }
 
-func appendLines(t *testing.T, path string, lines []string) {
-	t.Helper()
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	for _, l := range lines {
-		fmt.Fprintln(f, l)
-	}
-}
-
 // ── TestForwarder_BatchByCount ────────────────────────────────────────────────
 
 func TestForwarder_BatchByCount(t *testing.T) {

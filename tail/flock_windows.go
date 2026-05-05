@@ -25,6 +25,21 @@ const (
 	lockfileFailImmediately = 0x00000001
 )
 
+// lockSentinelOffset is the byte offset LockFileEx locks for mutual
+// exclusion. We deliberately pick a value far past any plausible lock-file
+// size so the lock does not collide with the small PID payload at offset 0:
+// LockFileEx is mandatory on Windows, so a lock at offset 0 would block
+// other processes (and tests) from reading the PID via os.ReadFile. Locks
+// past EOF are valid on NTFS and create no on-disk side effects.
+const lockSentinelOffset = 0x7FFFFFFFFFFFFFFE
+
+func sentinelOverlapped() syscall.Overlapped {
+	var ol syscall.Overlapped
+	ol.Offset = uint32(lockSentinelOffset & 0xFFFFFFFF)
+	ol.OffsetHigh = uint32(lockSentinelOffset >> 32)
+	return ol
+}
+
 type flock struct{ f *os.File }
 
 func acquireFlock(path string) (*flock, error) {
@@ -34,12 +49,12 @@ func acquireFlock(path string) (*flock, error) {
 	}
 
 	h := syscall.Handle(f.Fd())
-	var ol syscall.Overlapped
+	ol := sentinelOverlapped()
 	r, _, e := procLockFileEx.Call(
 		uintptr(h),
 		uintptr(lockfileExclusiveLock|lockfileFailImmediately),
 		0,    // reserved
-		1, 0, // lock 1 byte at offset 0
+		1, 0, // lock 1 byte at the sentinel offset (set via ol)
 		uintptr(unsafe.Pointer(&ol)),
 	)
 	if r == 0 {
@@ -62,7 +77,7 @@ func (l *flock) release() error {
 		return nil
 	}
 	h := syscall.Handle(l.f.Fd())
-	var ol syscall.Overlapped
+	ol := sentinelOverlapped()
 	procUnlockFileEx.Call(uintptr(h), 0, 1, 0, uintptr(unsafe.Pointer(&ol))) //nolint:errcheck
 	err := l.f.Close()
 	l.f = nil
