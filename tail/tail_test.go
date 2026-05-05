@@ -629,6 +629,62 @@ func TestTailer_Rotate(t *testing.T) {
 	}
 }
 
+// TestTailer_Rotate_DrainsTrailingBytes pins the headline rotation
+// correctness property at the Tailer level: bytes appended to the
+// rotated-out file between the watcher's last poll and the rotation
+// must still be yielded before content from the new file. The existing
+// TestTailer_Rotate doesn't verify drain because it consumes the entire
+// pre-rotation file before rotating; the LineReader's drain branch then
+// fires with zero bytes to drain.
+//
+// Sequence: write "first\n", read it (LineReader buffer empties, blocks
+// on the next poll), then in one go append "trailing\n" to the live
+// inode and rotate (rename + write "second\n" at the original path).
+// The Tailer must yield first → trailing → second with no loss.
+func TestTailer_Rotate_DrainsTrailingBytes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "drain.log")
+	if err := os.WriteFile(path, []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := mustNew(t, tailCfg(path))
+
+	if got := string(nextLine(t, ctx, tr).Line); got != "first" {
+		t.Fatalf("want first, got %q", got)
+	}
+
+	// Append trailing bytes to the inode the Tailer's LineReader has open,
+	// then rotate the path away and plant new content. The trailing bytes
+	// live on the rotated-out inode and must be drained via the still-open
+	// fd before the watcher's ReOpened triggers the switch.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("trailing\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := string(nextLine(t, ctx, tr).Line); got != "trailing" {
+		t.Fatalf("drain: want trailing, got %q (rotation lost trailing bytes)", got)
+	}
+	if got := string(nextLine(t, ctx, tr).Line); got != "second" {
+		t.Fatalf("after switch: want second, got %q", got)
+	}
+}
+
 func TestTailer_NoCursor_NoError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
