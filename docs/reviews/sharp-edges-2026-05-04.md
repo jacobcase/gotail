@@ -4,7 +4,7 @@
 - **Re-examined:** 2026-05-04 (added §9–§11 covering Decoder retry-policy doc lie, `WithSyncBackgroundInterval` mode-coupling, and `Interval` validator inconsistency).
 - **Skill:** trailofbits/sharp-edges
 - **Scope:** Flag/config surface and exported APIs across `cmd/gotail`, `tail`, `watch`, `forward`, `internal/atomicwrite`. v2 tree only; `v1/` excluded.
-- **Trust-boundary map:** `docs/reviews/AUDIT_CONTEXT.md` (Options structs are the caller→library trust boundary; everything caller-supplied is trusted, but the *shape* of that surface decides how easy the wrong call is).
+- **Trust-boundary map:** `docs/reviews/audit-context.md` (Options structs are the caller→library trust boundary; everything caller-supplied is trusted, but the *shape* of that surface decides how easy the wrong call is).
 - **Companion review:** `docs/reviews/insecure-defaults-2026-05-04.md` covers fail-open insecure defaults (symlink follow on cursor/lockfile open, `FailOnInodeMismatch=false`, unbounded retry). The findings below are the residual misuse-resistance gaps — places where the "easy path" silently produces the wrong behaviour even though no insecure default is technically in play.
 
 ## Scope notes (what does not apply)

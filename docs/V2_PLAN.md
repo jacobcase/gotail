@@ -1400,9 +1400,9 @@ came out of a review, links to the review section that drove the change.
 `v2-design-plan` branch on 2026-05-04. Reviews referenced live in
 [`./reviews/`](./reviews/):
 
-- [`CODE_REVIEW.md`](./reviews/CODE_REVIEW.md) — end-to-end code review
+- [`code-review-2026-05-04.md`](./reviews/code-review-2026-05-04.md) — end-to-end code review
   (2026-05-04).
-- [`PERF_REVIEW.md`](./reviews/PERF_REVIEW.md) — performance & simplicity
+- [`perf-review-2026-05-04.md`](./reviews/perf-review-2026-05-04.md) — performance & simplicity
   review (2026-05-04, closed).
 
 When updating the plan or shipping a new deviation, add the entry here and
@@ -1414,7 +1414,7 @@ that explicitly rather than fabricating a review back-reference.
 
 | Plan reference | What the plan committed | What ships today | Driver |
 |---|---|---|---|
-| Decision #4 | “Drop `golang.org/x/sys` dependency.” | Direct dep is dropped (`go.mod` shows it only `// indirect`), but it is still pulled in transitively by `fsnotify`. Spirit-of-the-plan compliance, not letter. | [PERF_REVIEW §H4](./reviews/PERF_REVIEW.md) tightened the stat path to a stdlib-only `statSizeInode` helper, eliminating the last in-tree x/sys touchpoints. The transitive pull from fsnotify remains. |
+| Decision #4 | “Drop `golang.org/x/sys` dependency.” | Direct dep is dropped (`go.mod` shows it only `// indirect`), but it is still pulled in transitively by `fsnotify`. Spirit-of-the-plan compliance, not letter. | [perf-review-2026-05-04 §H4](./reviews/perf-review-2026-05-04.md) tightened the stat path to a stdlib-only `statSizeInode` helper, eliminating the last in-tree x/sys touchpoints. The transitive pull from fsnotify remains. |
 
 ### 11.2 Architectural pivots (the code took a different path than the plan’s words)
 
@@ -1435,7 +1435,7 @@ internalised the plan’s mental model first must remap.
    (`watch/linereader.go:194-207`, `:215-251`). The drain semantics are
    preserved but the API surface that was supposed to expose them is
    absent.
-   *Driver:* [PERF_REVIEW §H3 (single-fd architecture)](./reviews/PERF_REVIEW.md). The duplicate-fd
+   *Driver:* [perf-review-2026-05-04 §H3 (single-fd architecture)](./reviews/perf-review-2026-05-04.md). The duplicate-fd
    architecture and its race window were eliminated; `PreRotation` was
    dropped from the public API in the same commit (`45e13fb`).
 
@@ -1458,7 +1458,7 @@ internalised the plan’s mental model first must remap.
    ```
    `Forwarder.Run` calls `Source.Next` directly. The iterator form survives
    only on `*tail.Tailer.Records`; the cross-package contract is pull-style.
-   *Driver:* [PERF_REVIEW §H1 (drop Forwarder feeder)](./reviews/PERF_REVIEW.md). The pull-style
+   *Driver:* [perf-review-2026-05-04 §H1 (drop Forwarder feeder)](./reviews/perf-review-2026-05-04.md). The pull-style
    `Next` plus per-call `context.WithDeadline` for `MaxBatchAge` lets
    `Forwarder.Run` honour the age timer without a feeder goroutine,
    buffered channel, or `recItem` wrapper.
@@ -1468,7 +1468,7 @@ internalised the plan’s mental model first must remap.
    *Actual:* `func New(ctx context.Context, opts Options) (*Tailer, error)`
    The `ctx` governs only startup I/O (`Source.Enumerate`, `Cursor.Load`);
    the runtime loop uses the per-call ctx of `Next`.
-   *Driver:* [CODE_REVIEW Small Polish (`tail/tail.go:121, 136`)](./reviews/CODE_REVIEW.md), which
+   *Driver:* [code-review-2026-05-04 Small Polish (`tail/tail.go:121, 136`)](./reviews/code-review-2026-05-04.md), which
    pointed out that `New` did blocking I/O against `context.Background()`
    and recommended a ctx parameter or `OpenContext` field.
 
@@ -1477,8 +1477,8 @@ internalised the plan’s mental model first must remap.
    close tmp. (Close after rename.)
    *Actual:* Write → fsync → **close** → rename → optional dir-fsync. Closing
    before rename is the conventional order.
-   *Driver:* [CODE_REVIEW §2 (atomicwrite.Write order)](./reviews/CODE_REVIEW.md). The plan’s
-   “close after rename” wording is now stale; PERF_REVIEW’s
+   *Driver:* [code-review-2026-05-04 §2 (atomicwrite.Write order)](./reviews/code-review-2026-05-04.md). The plan’s
+   “close after rename” wording is now stale; perf-review-2026-05-04’s
    “File handling & rotation correctness” section confirms the new order
    as textbook-correct.
 
@@ -1492,7 +1492,7 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    bug for double-digit numeric suffixes. The shipped code adds a dedicated
    `Logrotate` source with descending integer-`N` sort, a sibling-file-naming
    convention, and its own functional-options pattern.
-   *Driver:* [CODE_REVIEW §5 (Glob lex-sort wrong for double-digit suffixes)](./reviews/CODE_REVIEW.md),
+   *Driver:* [code-review-2026-05-04 §5 (Glob lex-sort wrong for double-digit suffixes)](./reviews/code-review-2026-05-04.md),
    which recommended either rejecting `[0-9]*` patterns, adding a
    comparator, or “offer a `tail.Logrotate` source that knows the
    numeric-tail convention.” The third option was taken.
@@ -1501,18 +1501,18 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    compressed (`.gz`) backup the source recognises but cannot expose. Plan
    Decision #12 deferred all .gz support to v2.1; the shipped code ships
    *partial* support — detection + observability hook, but no decompression.
-   *Driver:* [CODE_REVIEW §4 (Lumberjack `.gz` rejected silently)](./reviews/CODE_REVIEW.md), which
+   *Driver:* [code-review-2026-05-04 §4 (Lumberjack `.gz` rejected silently)](./reviews/code-review-2026-05-04.md), which
    recommended at minimum surfacing the skipped files via an
    `OnSkippedBackup`-style hook.
 3. **`tail.StaticSource(paths)`.** Replaces the plan’s
    `tail.MemorySource(paths)` (the immutable variant). The mutable variant
    was correctly relegated to `tailtest.MemorySource{}`.
-   *Driver:* [PERF_REVIEW §L3 (`MemorySource` naming collision)](./reviews/PERF_REVIEW.md), which
+   *Driver:* [perf-review-2026-05-04 §L3 (`MemorySource` naming collision)](./reviews/perf-review-2026-05-04.md), which
    recommended renaming the immutable variant to disambiguate from the
    mutating test helper.
 4. **`watch.StatInode(path)` is exported.** Used by `tail.findFileByInode`.
    The plan’s exported watch API list (§4) does not include it.
-   *Driver:* [PERF_REVIEW §H4 (Unix stat-only inode)](./reviews/PERF_REVIEW.md). The per-platform
+   *Driver:* [perf-review-2026-05-04 §H4 (Unix stat-only inode)](./reviews/perf-review-2026-05-04.md). The per-platform
    `statSizeInode` helper landed alongside the export so the polling and
    fsnotify watchers, plus `tail.findFileByInode`, could share a single
    stat-only path on Unix.
@@ -1530,12 +1530,12 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    copytruncate races the watcher missed. A hook author following the plan
    may not anticipate the second invocation site.
    *Driver:* Pre-review (defensive coding for copytruncate races).
-   PERF_REVIEW’s “File handling & rotation correctness” section confirms
+   perf-review-2026-05-04’s “File handling & rotation correctness” section confirms
    the double-defended copytruncate path.
 8. **Compressed-backup detection ships in v2.0.** Plan Decision #12 deferred
    to v2.1. Actual code recognises `.gz` variants in both `Lumberjack` and
    `Logrotate` and surfaces them via the skip-hook (see point 2 above).
-   *Driver:* [CODE_REVIEW §4](./reviews/CODE_REVIEW.md) — same finding as point 2.
+   *Driver:* [code-review-2026-05-04 §4](./reviews/code-review-2026-05-04.md) — same finding as point 2.
 9. **`tail.Options.OnInodeMismatch` hook.** Plan §4 L2 Options list omitted
    any inode-mismatch hook. The shipped surface adds an observation
    callback so embedders can wire alerting without parsing logs; fires
@@ -1561,9 +1561,9 @@ fix issues the plan ignored; some pre-empt v2.1 items.
    `tail.openFile` clears `t.whenceUsed` rather than zeroing
    `Options.Whence`. The plan didn’t specify either way, but the
    never-mutate-Options choice is explicit.
-   *Driver:* [CODE_REVIEW §6 (`Tailer.openFile` mutates `t.opts.Whence`)](./reviews/CODE_REVIEW.md),
+   *Driver:* [code-review-2026-05-04 §6 (`Tailer.openFile` mutates `t.opts.Whence`)](./reviews/code-review-2026-05-04.md),
    which recommended a private flag instead of mutating embedded options;
-   PERF_REVIEW’s goroutines/channels inventory likewise endorses the
+   perf-review-2026-05-04’s goroutines/channels inventory likewise endorses the
    private-flag style.
 2. **`Tailer.Position()` returns the most-recently-yielded record’s
    position, not a “current logical position without consuming.”** Plan

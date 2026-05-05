@@ -19,9 +19,9 @@ the plan, add or update an entry under §11.1–§11.5 with:
 
 Code, performance, security, and other reviews live in `docs/reviews/`:
 
-- `docs/reviews/PERF_REVIEW.md` — performance & simplicity review.
-- `docs/reviews/CODE_REVIEW.md` — end-to-end code review.
-- `docs/reviews/AUDIT_CONTEXT.md` — shared mental model future audits
+- `docs/reviews/perf-review-<YYYY-MM-DD>.md` — performance & simplicity review.
+- `docs/reviews/code-review-<YYYY-MM-DD>.md` — end-to-end code review.
+- `docs/reviews/audit-context.md` — shared mental model future audits
   reason against; *not* a findings doc.
 
 When running Trail of Bits security skills, write all findings reports to ./docs/reviews/<skill-name>-<YYYY-MM-DD>.md unless the skill specifies otherwise.

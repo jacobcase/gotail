@@ -6,7 +6,7 @@
   - `docs/reviews/insecure-defaults-2026-05-04.md` (4 findings)
   - `docs/reviews/sharp-edges-2026-05-04.md` (11 findings)
   - `docs/reviews/semgrep-2026-05-04.md` (7 findings)
-- **Trust-boundary reference:** `docs/reviews/AUDIT_CONTEXT.md`
+- **Trust-boundary reference:** `docs/reviews/audit-context.md`
 - **Scope:** v2 tree only (`cmd/gotail`, `tail`, `watch`, `forward`,
   `internal/atomicwrite`, `tailtest`, `forwardtest`, `watchtest`).
   `v1/` is excluded by the parent reviews and is not imported by any
@@ -57,7 +57,7 @@ the conclusion.
 
 **Step 1 — Data Flow.**
 Trust boundary: caller→library `Options` carries `cursor.path`
-(AUDIT_CONTEXT §4 #2 marks the cursor path as caller-supplied
+(audit-context §4 #2 marks the cursor path as caller-supplied
 "trusted"; the *parent directory* is filesystem state and is therefore
 in the §4 #2 "filesystem → process" untrusted band). Path:
 `tail.NewFileCursor(path)` → `FileCursor.Save` → `flush` →
@@ -135,7 +135,7 @@ PSEUDOCODE (attacker, local user with write to /var/lib/myapp/):
    → `atomicwrite.go:23`); they are literally `O_WRONLY|O_CREATE|
    O_TRUNC` with no `O_NOFOLLOW`/`O_EXCL`.
 2. *Trust-boundary confusion?* No — the parent directory is filesystem
-   state per AUDIT_CONTEXT §4 #2; "the gotail user owns the parent
+   state per audit-context §4 #2; "the gotail user owns the parent
    dir" is a deployment assumption, not a library guarantee.
 3. *Math rigor?* N/A — primitive is path-redirection.
 4. *Defense-in-depth confusion?* No — there is no upstream check.
@@ -248,8 +248,8 @@ gotail starts:
 `watch/fsnotify_unix.go:172-184` (mirror inside the watcher).
 
 **Step 1 — Data Flow.**
-Trust boundary: filesystem → process (AUDIT_CONTEXT §4 #2). Cursor's
-`Position.Inode` is the trust anchor for "same file" (AUDIT_CONTEXT
+Trust boundary: filesystem → process (audit-context §4 #2). Cursor's
+`Position.Inode` is the trust anchor for "same file" (audit-context
 §6 #4). Path: `tail.New` → `findFileByInode(files, cp.Pos.Inode,
 cp.Pos.File, NoInodeCheck)` → on `-1`, fires `OnInodeMismatch` (if
 non-nil); under default policy `FallbackOldest` resumes at index 0;
@@ -344,7 +344,7 @@ batch, ...)` → loop `Sink.Send(ctx, batch)`. Validation: only
 `errors.Is(err, ErrPermanent)` (line 268) and `ctx.Done()` during
 backoff sleep (line 286) terminate the loop. No `MaxAttempts`, no
 `MaxRetryDuration`, no default `SinkTimeout`. `WithSinkTimeout`
-exists (line 321) but is opt-in middleware. AUDIT_CONTEXT §6 #23,
+exists (line 321) but is opt-in middleware. audit-context §6 #23,
 §7.5 #20, §7.5 #27 already record the invariant.
 
 **Step 2 — Exploitability.**
@@ -514,7 +514,7 @@ caller-supplied. Validation: none of the comparison `lockPath !=
 path` exists in `NewFileCursor`. Sink: `os.Rename(tmp, path)` swaps
 the directory entry → the inode that the flock holder retains an fd
 to becomes orphaned; the new inode at `path` has no flock. POSIX
-flock is per-inode-per-fd. AUDIT_CONTEXT §6 #15 codifies the
+flock is per-inode-per-fd. audit-context §6 #15 codifies the
 invariant.
 
 **Step 2 — Exploitability.**
@@ -720,7 +720,7 @@ forwarder.Run(ctx) // batches grow indefinitely; never flushes;
 Trust boundary: caller→library. Path: `Tailer.Commit` → `Cursor.Save`
 → under `SyncOnCommit` writes only `c.pending`/`c.dirty` under `mu`,
 returns nil. Disk is never touched on `Save`. Flush requires
-type-assertion `Cursor.(Syncer).Sync(ctx)`. AUDIT_CONTEXT §7.6 #31.
+type-assertion `Cursor.(Syncer).Sync(ctx)`. audit-context §7.6 #31.
 
 **Step 2 — Exploitability.**
 Not adversarial; misuse hazard. The mode name itself ("`SyncOnCommit`")
@@ -976,7 +976,7 @@ breaks it).
 
 **Step 1 — Data Flow.**
 Trust boundary: caller→library (Decoder is caller-supplied per
-AUDIT_CONTEXT §2.5). Path: `Decoder(line)` → `if derr != nil
+audit-context §2.5). Path: `Decoder(line)` → `if derr != nil
 { OnDecodeError(...); batchLastPos = rec.Pos; continue }`. There is
 no `errors.Is(derr, ErrPermanent)` branch. Doc claims wrap-with-
 ErrPermanent aborts; code never inspects the wrapped error.

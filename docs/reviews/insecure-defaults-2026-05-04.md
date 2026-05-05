@@ -3,7 +3,7 @@
 - **Conducted:** 2026-05-04
 - **Skill:** trailofbits/insecure-defaults
 - **Scope:** v2 tree (`cmd/gotail`, `tail`, `watch`, `forward`, `internal/atomicwrite`, `tailtest`, `forwardtest`, `watchtest`); `v1/` excluded.
-- **Trust-boundary map:** `docs/reviews/AUDIT_CONTEXT.md` (filesystem input dominates; no env-based config, no auth, no HTTP server, no credentials).
+- **Trust-boundary map:** `docs/reviews/audit-context.md` (filesystem input dominates; no env-based config, no auth, no HTTP server, no credentials).
 
 ## Scope notes (what does not apply)
 
