@@ -754,7 +754,7 @@ func (s *backoffSource) Next(_ context.Context) (tail.Record, error) {
 	return tail.Record{Line: []byte("x"), Pos: tail.Position{Offset: int64(s.sent)}}, nil
 }
 func (s *backoffSource) Commit(_ context.Context, _ forward.Position) error { return nil }
-func (s *backoffSource) Done() <-chan struct{}                               { return nil }
+func (s *backoffSource) Done() <-chan struct{}                              { return nil }
 
 func TestForwarder_BackoffJitter_Full(t *testing.T) {
 	// BackoffJitter=1 preserves the current full-jitter behaviour:

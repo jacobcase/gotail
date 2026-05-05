@@ -96,16 +96,16 @@ type Options struct {
 	// Hooks — all optional and nil-safe. Hooks are invoked synchronously
 	// from the read loop and must not block; offload slow work to a
 	// goroutine or buffered channel if needed.
-	OnDropped        func(droppedFiles int)
-	OnRotated        func(from, to Position)
-	OnError          func(err error)
+	OnDropped func(droppedFiles int)
+	OnRotated func(from, to Position)
+	OnError   func(err error)
 	// OnTruncated may fire from two paths: the watcher's truncation event,
 	// and a late-detection check inside LineReader.Next when the file's size
 	// has dropped below the current offset (defensive against copytruncate
 	// races the watcher missed). Hooks must be idempotent across both sites.
-	OnTruncated      func(at Position)
-	OnCheckpoint     func(c Checkpoint)
-	OnInodeMismatch  func(want, got uint64)
+	OnTruncated     func(at Position)
+	OnCheckpoint    func(c Checkpoint)
+	OnInodeMismatch func(want, got uint64)
 }
 
 // Stats is a point-in-time snapshot of counters maintained by a [Tailer].

@@ -279,7 +279,7 @@ func TestTailer_OnInodeMismatch_HookFires(t *testing.T) {
 		Source:              tail.SingleFile(path),
 		Cursor:              cur,
 		Interval:            10 * time.Millisecond,
-		AllowInodeMismatch:  true,             // opt out of fail-safe default
+		AllowInodeMismatch:  true,              // opt out of fail-safe default
 		OnMissingCheckpoint: tail.SkipToActive, // force success past mismatch
 		OnInodeMismatch: func(want, got uint64) {
 			hookCalls++
@@ -1722,4 +1722,3 @@ func TestNew_RejectsSeekCurrent(t *testing.T) {
 		t.Fatal("Whence=io.SeekCurrent: want error, got nil")
 	}
 }
-

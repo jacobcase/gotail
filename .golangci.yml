@@ -1,10 +1,10 @@
 version: "2"
 
+# Standalone CI jobs already cover go vet, staticcheck (which subsumes
+# unused/gosimple in golangci-lint v2), and govulncheck. golangci-lint
+# runs only the linters those jobs do not cover.
 linters:
+  default: none
   enable:
-    - govet
     - errcheck
     - ineffassign
-    - unused
-    - gosimple
-    - staticcheck
