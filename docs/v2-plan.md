@@ -97,7 +97,7 @@ This shape covers log forwarders (Vector / Fluent Bit / Promtail-style), event-t
 | ext | Sentinel errors via `errors.Is/As` | `ErrCheckpointMissing`, `ErrInodeMismatch`, `ErrSourceExhausted`, `ErrLockHeld`, `ErrLineTooLong`, `ErrPermanent` | All |
 | ext | Three packages not three structs | `github.com/jacobcase/gotail/watch`, `.../tail`, `.../forward` | All |
 | ext | Hooks not concrete metrics | `OnBatchSent`, `OnSendError`, `OnCommitted`, `OnDecodeError`, `OnDropped`, `OnError`, `OnCheckpoint` callback fields. No prom/otel deps | L2/L3 |
-| ext | Memory-backed adapters for tests | `tail.NewMemoryCursor()`, `tail.MemorySource()`, `watch.FakeWatcher()`, `forwardtest.RecordingSink[T]` / `FailingSink[T]` | All |
+| ext | Memory-backed adapters for tests | `tail.NewMemoryCursor()`, `tail.StaticSource()`, `tailtest.MemorySource{}`, `watch.FakeWatcher()`, `forwardtest.RecordingSink[T]` / `FailingSink[T]` | All |
 | ext | Iterator form | `Tailer.Records(ctx) iter.Seq2[Record, error]` | L2 |
 | ext | Pull-style escape hatch | `Tailer.Next(ctx) (Record, error)` | L2 |
 | ext | Inode opt-out for Windows/weird FS | `tail.Options.NoInodeCheck bool` | L2 |
@@ -127,7 +127,7 @@ Additional v2 wishlist items map cleanly:
 ```
 github.com/jacobcase/gotail/
 ├── watch/                  L1 — file-as-stream primitives
-│   ├── watch.go            Watcher, Event, PreRotation, Position, Config
+│   ├── watch.go            Watcher, Event, Position, Config, StatInode
 │   ├── poll.go             Polling implementation (always available)
 │   ├── fsnotify_unix.go    fsnotify implementation (default; opt out with gotail_nofsnotify)
 │   ├── fsnotify_stub.go    Stub returning ErrUnsupported (Windows / opt-out)
@@ -137,7 +137,7 @@ github.com/jacobcase/gotail/
 │
 ├── tail/                   L2 — durable line-oriented tail with cursor
 │   ├── tail.go             Tailer, Options, Record
-│   ├── source.go           Source interface; SingleFile, Lumberjack, Glob, MemorySource
+│   ├── source.go           Source interface; SingleFile, Lumberjack, Logrotate, Glob, StaticSource
 │   ├── cursor.go           Cursor interface; FileCursor, MemoryCursor
 │   ├── flock_unix.go       Advisory lock via syscall.Flock
 │   ├── flock_windows.go    Advisory lock via LockFileEx
@@ -191,24 +191,15 @@ type Position struct {
 // emits events; it does NOT yield bytes. The consumer (typically LineReader)
 // opens its own file handle against Event.Path for normal reads.
 //
-// On rotation, Event.PreRotation provides access to trailing bytes from the
-// rotated-out file via a Reader the Watcher keeps open until the next Wait
-// call — this preserves the v1 race-aware drain behavior without forcing
-// every consumer to share the Watcher's file handle.
+// LineReader keeps the previous file's fd open after a ReOpened event and
+// drains it to io.EOF before opening the new path — this preserves the
+// rotation-race trailing-bytes invariant without forcing the Watcher to
+// expose an io.Reader.
 type Event struct {
-    Path        string       // current active path; only changes when ReOpened
-    Pos         Position     // logical position at the time of the event
-    ReOpened    bool         // first open or rotation detected
-    Truncated   bool         // size dropped below previous position
-    PreRotation *PreRotation // non-nil when ReOpened due to rotation with pending bytes
-}
-
-// PreRotation grants access to trailing bytes on the rotated-out file.
-// Reader is valid until the next call to Watcher.Wait or Close.
-type PreRotation struct {
-    Reader    io.Reader  // bounded; do not seek
-    FinalSize int64      // total bytes available
-    StartPos  int64      // consumer's position when rotation was detected
+    Path      string    // current active path; only changes when ReOpened
+    Pos       Position  // logical position at the time of the event
+    ReOpened  bool      // first open or rotation detected
+    Truncated bool      // size dropped below previous position
 }
 
 // Watcher emits events about file state transitions. Production
@@ -220,13 +211,18 @@ type Watcher interface {
 }
 
 type Config struct {
-    Path         string
-    Interval     time.Duration  // poll interval; 0 = 1s default
-    Whence       int            // io.SeekStart | io.SeekEnd (SeekCurrent rejected — §11.4 #3)
-    Resume       *Position      // optional resume point; subject to inode match
-    StopAtEOF    bool
-    Logger       *slog.Logger   // optional; default = slog.Default()
-    NoInodeCheck bool           // skip inode equality check (Windows / weird FS)
+    Path               string
+    Interval           time.Duration  // poll interval; 0 = 1s default; negative rejected
+    Whence             int            // io.SeekStart | io.SeekEnd; SeekCurrent rejected
+    Resume             *Position      // optional resume point; subject to inode match
+    StopAtEOF          bool
+    Logger             *slog.Logger   // optional; default = slog.Default()
+    NoInodeCheck       bool           // skip inode equality check (Windows / weird FS)
+    AllowInodeMismatch bool           // default false: constructors error with ErrInodeMismatch
+                                       // when Resume's inode does not match Path's current inode.
+                                       // Set true to warn-and-resume.
+    OnInodeMismatch    func(want, got uint64) // observation hook; fires before
+                                              // AllowInodeMismatch policy decision
 }
 
 func NewPolling(c Config) (Watcher, error)
@@ -237,6 +233,12 @@ func New(c Config) (Watcher, error)          // fsnotify with poll fallback
 // pos, then EOF on subsequent Wait calls. Combine with a tmpfile populated by
 // the test for full LineReader unit-testability without a real polling loop.
 func FakeWatcher(path string, pos Position) Watcher
+
+// StatInode returns the platform-specific inode/file-id for path without
+// opening the file. Used by tail.findFileByInode to anchor a checkpointed
+// inode against the current filesystem state; exported so callers wiring
+// custom Sources can perform the same anchor check.
+func StatInode(path string) (uint64, error)
 
 // LineReader frames lines on top of a Watcher. It owns its own *os.File
 // (opened against Event.Path) and its own bufio buffer. The Watcher only
@@ -267,7 +269,7 @@ var (
 
 L1 deliberately persists nothing.
 
-**Why the Watcher/LineReader split:** v1 had `WaitStatus.Reader io.Reader` with the contract "do not seek; watcher owns the underlying *os.File". That's three pieces of out-of-band rule in a doc comment, and it forced LineReader to be tested against a real Watcher. v2 splits the *driving* port (events) from the *driven* port (bytes): Watcher signals; LineReader opens its own fd. The rotation-race-correctness drain that v1 needed is preserved via the bounded `PreRotation.Reader`, which is the only place an `io.Reader` crosses the port — and only on rotation events. LineReader becomes unit-testable with `FakeWatcher` plus a tmpfile (no polling loop needed).
+**Why the Watcher/LineReader split:** the *driving* port (events) and the *driven* port (bytes) are different concerns. The Watcher signals state transitions; the LineReader owns the only fd and frames bytes. After a `ReOpened` event the LineReader keeps reading the previous fd until `io.EOF`, then `os.Open`s the new path — preserving the rotation-race trailing-bytes drain without crossing an `io.Reader` through the Watcher port. LineReader becomes unit-testable with `FakeWatcher` plus a tmpfile (no polling loop needed).
 
 #### L2: `package tail`
 
@@ -297,14 +299,22 @@ type Source interface {
 
 // Built-in sources.
 func SingleFile(path string) Source
-func Lumberjack(activePath string) Source           // recognizes lumberjack backup naming
-func Glob(active string, backupGlob string) Source  // explicit glob
+func Lumberjack(activePath string, opts ...LumberjackOption) Source  // lumberjack-style timestamped backups
+func Logrotate(activePath string, opts ...LogrotateOption) Source    // logrotate-style numeric-tail (.1, .2, ...)
+func Glob(active string, backupGlob string) Source                   // explicit glob
 
-// MemorySource returns the given paths as-is on every Enumerate. Tests use
-// this to drive the Tailer through controlled rotation scenarios without
-// real lumberjack rotation. For mutable test scenarios (Add/Prune mid-tail),
-// see tailtest.MemorySource.
-func MemorySource(paths []string) Source
+// Compressed-backup behaviour: Lumberjack and Logrotate recognise .gz
+// variants of their backup naming and skip them (the library does not
+// decompress). Use WithLumberjackSkippedHook / WithLogrotateSkippedHook to
+// observe skipped files for diagnostics; a checkpoint pointing at an aged-off
+// .gz falls through to OnMissingCheckpoint policy.
+func WithLumberjackSkippedHook(fn func(path string)) LumberjackOption
+func WithLogrotateSkippedHook(fn func(path string)) LogrotateOption
+
+// StaticSource returns the given paths as-is on every Enumerate. Use for
+// fixed file sets that do not rotate at runtime. For mutable test scenarios
+// (Add/Prune mid-tail), see tailtest.MemorySource.
+func StaticSource(paths []string) Source
 
 // Cursor persists a Checkpoint (Position + opaque user metadata).
 type Cursor interface {
@@ -355,23 +365,25 @@ type Record struct {
 type Options struct {
     Source              Source
     Cursor              Cursor             // nil = no persistence (acts like L1)
-    RequireCursor       bool               // §11.3 #11 — error from New if Cursor is nil
+    RequireCursor       bool               // when true, New errors if Cursor is nil
     Logger              *slog.Logger
-    Interval            time.Duration       // negative rejected (§11.4 #5)
+    Interval            time.Duration       // 0 = 1s default; negative rejected
     ForcePolling        bool
 
     StopAtEOF           bool
     OnMissingCheckpoint MissingPolicy
-    AllowInodeMismatch  bool               // §11.4 #6 — default false = fail-safe;
-                                            // true falls through to OnMissingCheckpoint policy
+    AllowInodeMismatch  bool               // default false: New errors when the cursor's
+                                            // path exists with a different inode. Set true
+                                            // to fall through to OnMissingCheckpoint policy.
 
     // Hooks. All optional; nil-safe.
-    OnDropped     func(droppedFiles int)
-    OnRotated     func(from, to Position)
-    OnError       func(err error)
-    OnTruncated   func(at Position)
-    OnCheckpoint  func(c Checkpoint)
-    OnInodeMismatch func(want, got uint64)
+    OnDropped       func(droppedFiles int)
+    OnRotated       func(from, to Position)
+    OnError         func(err error)
+    OnTruncated     func(at Position)
+    OnCheckpoint    func(c Checkpoint)
+    OnInodeMismatch func(want, got uint64)  // observation hook; fires before
+                                             // AllowInodeMismatch policy decision
 }
 
 type MissingPolicy int
@@ -383,7 +395,9 @@ const (
 
 type Tailer struct { /* unexported */ }
 
-func New(opts Options) (*Tailer, error)
+// New constructs a Tailer. ctx governs only startup I/O (Source.Enumerate,
+// Cursor.Load); the runtime loop uses the per-call ctx of Next.
+func New(ctx context.Context, opts Options) (*Tailer, error)
 
 // Records is the iterator form (Go 1.23+ range-over-func). Cursor is NOT
 // auto-advanced — caller must call Commit explicitly.
@@ -396,8 +410,10 @@ func (t *Tailer) Next(ctx context.Context) (Record, error)
 func (t *Tailer) Commit(ctx context.Context, pos Position) error
 func (t *Tailer) CommitWithMeta(ctx context.Context, pos Position, meta any) error
 
-// Position returns the current logical position without consuming a record.
-// For non-iterator callers (metrics scrapers, snapshot readers).
+// Position returns the position of the most recently yielded record. Between
+// Next calls this equals the next-commit point; mid-Next hooks (e.g.
+// OnTruncated) see the pre-yield value, since t.cur is updated after the
+// line is returned, not after each Watcher event.
 func (t *Tailer) Position() Position
 
 // Done is closed when Source is exhausted in StopAtEOF mode.
@@ -433,9 +449,11 @@ type Position = tail.Position
 // RecordSource is the input port the Forwarder reads from. *tail.Tailer
 // satisfies this interface; tests can supply a fake. Defining it here (rather
 // than taking *tail.Tailer directly) keeps Forwarder testable in isolation
-// and mirrors the symmetry of the Sink[T] output port.
+// and mirrors the symmetry of the Sink[T] output port. Pull-style: Run reads
+// records one at a time and applies a per-call deadline derived from the
+// MaxBatchAge timer to honour the age bound without a feeder goroutine.
 type RecordSource interface {
-    Records(ctx context.Context) iter.Seq2[tail.Record, error]
+    Next(ctx context.Context) (tail.Record, error)
     Commit(ctx context.Context, pos Position) error
     Done() <-chan struct{}
 }
@@ -444,7 +462,8 @@ type RecordSource interface {
 //   nil                              → batch durable downstream; advance cursor.
 //   errors.Is(err, ErrPermanent)     → unrecoverable; Forwarder.Run returns err.
 //   any other non-nil error          → retryable; Forwarder backs off and retries
-//                                      the same batch indefinitely (or until ctx).
+//                                      the same batch (until ctx, until MaxAttempts,
+//                                      or indefinitely if MaxAttempts == 0).
 type Sink[T any] interface {
     Send(ctx context.Context, batch []T) error
 }
@@ -452,7 +471,11 @@ type Sink[T any] interface {
 type SinkFunc[T any] func(ctx context.Context, batch []T) error
 func (f SinkFunc[T]) Send(ctx context.Context, batch []T) error { return f(ctx, batch) }
 
-// Decoder converts a raw line to T. Errors advance past the line.
+// Decoder converts a raw line to T. Most errors advance past the line so a
+// malformed entry doesn't stall the pipeline. A decoder that returns an
+// error wrapping ErrPermanent aborts Run without advancing the cursor —
+// use that when the decoder cannot make progress (e.g. schema mismatch
+// the caller wants to fix before resuming).
 type Decoder[T any] func(line []byte) (T, error)
 
 func IdentityDecoder(line []byte) ([]byte, error)   // no copy; warning in doc comment
@@ -465,6 +488,7 @@ type Options[T any] struct {
     Sink    Sink[T]
 
     // Batching — both bounds apply, whichever fires first.
+    // All three reject negative values at construction time.
     MaxBatchRecords int
     MaxBatchBytes   int
     MaxBatchAge     time.Duration
@@ -472,8 +496,9 @@ type Options[T any] struct {
     // Retry policy.
     InitialBackoff time.Duration
     MaxBackoff     time.Duration
-    BackoffJitter  float64        // 0..1; 0 = deterministic (no implicit default — §11.4 #4)
-    MaxAttempts    int            // 0 = unlimited (§11.3 #10)
+    BackoffJitter  float64        // 0..1; 0 = deterministic (no implicit default).
+                                  // 0.2 = conventional ±20% jitter.
+    MaxAttempts    int            // 0 = unlimited
 
     // Hooks. OnCommitted fires after a successful Sink.Send + Source.Commit;
     // distinct from L2's OnCheckpoint (which fires on Cursor.Save).
@@ -483,8 +508,7 @@ type Options[T any] struct {
     OnDecodeError  func(line []byte, pos Position, err error)
     // OnDropped intentionally absent at L3 — drops occur in the Tailer (L2)
     // before records reach the Forwarder. Use tail.Options.OnDropped instead.
-    // See §11.5 for rationale.
-    OnBackoffSleep func(d time.Duration)
+    OnBackoffSleep func(d time.Duration, attempt int)
 
     Logger *slog.Logger
 }
@@ -494,7 +518,10 @@ type Forwarder[T any] struct { /* unexported */ }
 func New[T any](opts Options[T]) (*Forwarder[T], error)
 
 // Run blocks until ctx canceled, Sink returns an error wrapping ErrPermanent,
-// or Source signals exhaustion via Done(). Returns nil on normal exhaustion,
+// or Source signals exhaustion. Two exhaustion paths terminate Run cleanly:
+// Source.Next returning tail.ErrSourceExhausted, and Source.Done() closing.
+// Either path drains the in-flight batch with retries against the parent ctx
+// so the last batch is still delivered. Returns nil on normal exhaustion,
 // ctx.Err() on cancellation, or the Sink's permanent error otherwise. Run is
 // one-shot: a Forwarder that has returned cannot be re-run; construct a new
 // one to restart.
@@ -604,10 +631,10 @@ This makes "fsnotify just works" the default while preserving an escape hatch fo
 
 **Atomic write protocol:**
 
-1. Open `<cursor_path>.tmp` with `O_WRONLY|O_CREATE|O_TRUNC|O_EXCL|O_NOFOLLOW`. A pre-existing symlink is refused; a stale regular tmp from a crashed prior write is unlinked first so `O_EXCL` succeeds. (Symlink refusal — §11.4 #1.)
+1. Open `<cursor_path>.tmp` with `O_WRONLY|O_CREATE|O_TRUNC|O_EXCL|O_NOFOLLOW`. A pre-existing symlink is refused; a stale regular tmp from a crashed prior write is unlinked first so `O_EXCL` succeeds. (Windows variants refuse reparse points via `os.Lstat` before opening.)
 2. Write the cursor bytes.
 3. `f.Sync()` (fsync the data + metadata of the temp file).
-4. Close the temp file's fd before renaming (Windows requirement; surfaces NFS/async-mount close-time errors). (See §11.2 #4.)
+4. `f.Close()` — close before renaming (Windows requirement; also surfaces NFS/async-mount close-time errors).
 5. `os.Rename(tmp, final)`.
 6. (Optional, default on) `dir.Sync()` to fsync the directory entry. Required for power-loss durability of the rename itself on ext4/xfs/etc.
 
@@ -671,11 +698,11 @@ func NewMemoryCursor() Cursor
 
 // Options
 WithDirSync(on bool)
-WithFlock(lockPath string)        // must differ from cursor path (§11.4 #7)
+WithFlock(lockPath string)        // must differ from cursor path (NewFileCursor errors on equality)
 WithSyncMode(SyncMode)
 WithFileMode(os.FileMode)         // default 0o600; rejects group/world-write
-                                   // and special bits (§11.4 #8)
-WithSyncBackgroundInterval(d)     // requires WithSyncMode(SyncBackground) (§11.4 #9)
+                                   // and special bits (setuid/setgid/sticky)
+WithSyncBackgroundInterval(d)     // requires WithSyncMode(SyncBackground); errors otherwise
 ```
 
 **Pluggability:** because `Cursor` is an interface, users can plug in alternatives — Redis-backed, SQL-backed, Consul KV, etc. The library ships file + memory; everything else is BYO.
@@ -688,7 +715,7 @@ WithSyncBackgroundInterval(d)     // requires WithSyncMode(SyncBackground) (§11
 
 `tail.WithFlock(lockPath string)` is a `FileCursorOption`. When set:
 
-1. On `NewFileCursor`, open `lockPath` with `O_CREATE | O_RDWR | O_NOFOLLOW`, mode `0o600`. Refuse to follow a pre-positioned symlink (§11.4 #2). Reject construction when `lockPath` equals the cursor path (§11.4 #7).
+1. On `NewFileCursor`, open `lockPath` with `O_CREATE | O_RDWR | O_NOFOLLOW`, mode `0o600` (Unix); on Windows, refuse reparse points via `os.Lstat` before opening. Reject construction when `lockPath` equals the cursor path — renaming the cursor would lose the lock on Linux (the lock is on the inode, not the path).
 2. Call `syscall.Flock(fd, LOCK_EX | LOCK_NB)` (Unix) or `LockFileEx` with `LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY` (Windows).
 3. On lock failure, return `ErrLockHeld` wrapped in a descriptive error (`fmt.Errorf("lock held on %s: %w", lockPath, ErrLockHeld)`).
 4. On `Close`, the file descriptor is closed; the OS releases the lock automatically.
@@ -733,7 +760,7 @@ WithSyncBackgroundInterval(d)     // requires WithSyncMode(SyncBackground) (§11
 | L3 | `OnSendError` | `func(err error, attempt int, willRetry bool)` | Sink.Send returned err |
 | L3 | `OnCommitted` | `func(pos Position)` | Forwarder advanced cursor (post Sink.Send + Source.Commit success) |
 | L3 | `OnDecodeError` | `func(line []byte, pos Position, err error)` | Decoder failed; line is being skipped |
-| L3 | `OnBackoffSleep` | `func(d time.Duration)` | About to sleep d before retry |
+| L3 | `OnBackoffSleep` | `func(d time.Duration, attempt int)` | About to sleep d before retry attempt |
 
 **Why callbacks not channels:**
 
@@ -783,6 +810,7 @@ forward.New(forward.Options[[]byte]{
       currentState.Position = 0
       continue read loop
   ```
+- `OnTruncated` fires from two sites, by design: the watcher event loop catches the common case, and `LineReader.Next` catches copytruncate races the watcher missed (the `fi.Size() < l.pos.Offset` block — small windows where a truncation lands between watcher ticks and the LineReader is mid-refill). Hook authors must handle both invocation paths idempotently.
 - copytruncate detection requires per-tick stat of the *open fd* (not just the path). `pollWatcher.Wait` already does this (`poll_watcher.go:106`). The only change: handle `Size < Position` by truncating instead of declaring an error.
 - Inode reuse + small-file edge case: if the new file is opened via the `rename+create` path but happens to inherit the same inode the old file had (rare but possible after long uptime), the existing `SeekIfMatches` would happily seek into it. Mitigation: when crossing rotation, *always* start the new file at offset 0 regardless of `StartState`. This is already implicit in `pollWatcher.Wait` — it only consults `StartState` on the very first open (`poll_watcher.go:165`).
 
@@ -845,7 +873,7 @@ cur, err := tail.NewFileCursor(
 )
 if err != nil { return err }
 
-t, err := tail.New(tail.Options{
+t, err := tail.New(ctx, tail.Options{
     Source: src,
     Cursor: cur,
     Logger: slog.Default(),
@@ -928,7 +956,7 @@ These are best-in-class additions a v2 should ship:
 
 6. **Backoff jitter.** v1 has none. v2: full-jitter exponential backoff with configurable jitter factor. Prevents thundering-herd retries when a fleet of gotail-using processes sees the same upstream blip.
 
-7. **Context-aware `Sink`.** The `Sink[T].Send(ctx, batch)` signature includes the context. A misbehaving sink that ignores ctx will hang the forwarder; document that ctx must be respected, and provide a helper `WithSinkTimeout(d)` that wraps a Sink in a per-call context with deadline.
+7. **Context-aware `Sink`.** The `Sink[T].Send(ctx, batch)` signature includes the context. A misbehaving sink that ignores ctx will hang the forwarder; document that ctx must be respected, and provide a helper `WithSinkTimeout[T](d)` that wraps a `Sink[T]` in a per-call context with deadline. The helper is parameterised on T so the wrapped sink retains its element type.
 
 8. **`forward.RecordingSink[T]` and `FailingSink[T]` test helpers.** In a `forwardtest` subpackage. Saves every consumer from rewriting their own.
 
@@ -980,13 +1008,11 @@ func (l *LineReader) Next(ctx context.Context) ([]byte, Position, error) {
 
 Buffer ownership rule: **the returned `[]byte` is valid until the next call to `Next` or `Close`.** Callers must copy if they retain. Document prominently. This matches `bufio.Scanner.Bytes()` semantics, which Go developers already know.
 
-#### Strategy 2: `sync.Pool` for transient line copies — considered, dropped post-pivot
+#### Strategy 2: `sync.Pool` for transient line copies — not used
 
-**Status: not implemented. See §11 for history.**
+The library does not pool line copies. `Forwarder[T]` is generic, so a pool can only target `T = []byte`, and there is no clean type-generic seam for returning a buffer to a pool after `Sink.Send`. `IdentityDecoderCopy` users who care about allocations already have the `Decoder[T]` callback as their BYO pool seam.
 
-The plan originally proposed an `internal/bufpool` package (`sync.Pool` for line copies) wired into `Forwarder` batches. After the architectural pivot in §11.2 #2 (Records→Next, no feeder goroutine) the natural integration point was removed. `Forwarder[T]` is generic; a pool can only target `T = []byte`, and there is no clean type-generic seam for `bufpool.Put` after `Sink.Send`. Additionally, `IdentityDecoderCopy` users who care about allocations already have the `Decoder[T]` callback as their BYO pool seam.
-
-`BenchmarkForwarder_Throughput` without bufpool (2026-05-04, Apple M4 Pro):
+`BenchmarkForwarder_Throughput` (2026-05-04, Apple M4 Pro):
 
 ```
 BenchmarkForwarder_Throughput-14   6930673   177.0 ns/op   5649159 records/s   224 B/op   4 allocs/op
@@ -994,7 +1020,7 @@ BenchmarkForwarder_Throughput-14   6680863   177.7 ns/op   5626642 records/s   2
 BenchmarkForwarder_Throughput-14   6646902   178.4 ns/op   5604866 records/s   224 B/op   4 allocs/op
 ```
 
-~5.6M records/sec; 4 allocs/op on the hot path. Decision: accept these numbers rather than adding pool complexity. See §11.
+~5.6M records/sec; 4 allocs/op on the hot path. Acceptable without pool complexity.
 
 #### Strategy 3: Avoid `bufio.NewReader` reallocation on rotation
 
@@ -1232,7 +1258,7 @@ All decisions below are locked in before implementation begins.
 | 1 | Module name: `github.com/jacobcase/gotail/v2` (vN suffix) or new repo? | `gotail/v2` | Standard Go module-versioning idiom; preserves history. |
 | 2 | Min Go version | **Go 1.26 or later** | User-specified. Comfortably above the 1.23 floor needed for `iter.Seq2`; gives access to all current stdlib improvements. |
 | 3 | fsnotify: vendor it via build tag, or build our own? | Build tag in fsnotify. Default off. | Re-implementing risks reproducing platform bugs fsnotify already fixed. Build tag preserves zero-deps default. |
-| 4 | Drop `golang.org/x/sys`? | Yes | Stdlib `syscall` is sufficient on every platform we target; v1's dual-switch is dead code. |
+| 4 | Drop `golang.org/x/sys`? | Yes as a direct dependency. Stdlib `syscall` is sufficient on every platform we target; v1's dual-switch is dead code. `x/sys` remains in `go.mod` as an indirect dep pulled by `fsnotify`; the `gotail_nofsnotify` build tag drops it entirely. | Direct-dep-clean is the goal; transitive pulls inherited from a vetted upstream are acceptable. |
 | 5 | Cursor format: JSON or binary? | JSON | Human-inspectable, schema-evolution friendly, encoding cost is irrelevant at ~100 bytes. |
 | 6 | Cursor file `Meta` size cap? | 64 KiB, return error on oversize | Prevents accidental log-aggregation footguns. Generous enough for any reasonable use. |
 | 7 | Default poll interval? | 1 second (matches v1) | Balance of responsiveness and idle CPU. Override per-Tailer. |
@@ -1240,12 +1266,12 @@ All decisions below are locked in before implementation begins.
 | 9 | Should L2 expose `Tailer.Position()`? | Yes | Lets non-iterator users introspect without consuming a record. |
 | 10 | Should L3 own the flock or L2? | L2 | Flock protects the cursor; cursor is L2's asset. Future L2-only consumers still get protection. |
 | 11 | Should `Forwarder.Run` be re-entrant after returning? | No | One-shot. Document. Construct a new Forwarder if you want to restart. |
-| 12 | Compressed backup file support (.gz)? | Defer to v2.1 | Adds bytes-vs-offset semantic axis. Not on the driving requirement list (§3). |
+| 12 | Compressed backup file support (.gz)? | Detection ships in v2.0; decompression deferred to v2.1. `Lumberjack` and `Logrotate` recognise `.gz` variants and skip them, surfacing the skipped path via `WithLumberjackSkippedHook` / `WithLogrotateSkippedHook` for observability. A checkpoint pointing at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy. | Skip-and-observe is cheap and prevents silent data omission; full decompression adds the bytes-vs-offset semantic axis and waits for v2.1. |
 | 13 | Hybrid fsnotify+poll mode? | Defer to v2.1 | Single-mode is correct; hybrid is a latency optimization. Design API to allow later addition. |
 | 14 | Should we ship a CLI binary (`cmd/gotail`)? | Yes, small one | Replaces some `tail -F` use cases; serves as integration test. ~50 LOC. |
 | 15 | Default `MissingPolicy` for `OnMissingCheckpoint`? | `FallbackOldest` | Matches driving requirement #4 (lose nothing, accept duplicates). Most graceful default for at-least-once shippers. |
 | 16 | License of v2? | Same as v1 (file `LICENSE`) | No reason to change. |
-| 17 | (superseded) Should `WaitStatus.Reader` be `io.Reader` or `io.ReadCloser`? | Watcher no longer returns a reader. The Watcher/LineReader split (see §4 L1) means LineReader opens its own `*os.File`; the only `io.Reader` crossing the port is `PreRotation.Reader` on rotation events, which is bounded to next-Wait lifetime. | Question made obsolete by the architectural fix. |
+| 17 | Should the Watcher port expose an `io.Reader`? | No. The Watcher/LineReader split (§4 L1) means LineReader owns the only `*os.File`; the Watcher emits state-transition events only. After a `ReOpened` event the LineReader keeps reading the previous fd to `io.EOF` before opening the new path, preserving the rotation-race trailing-bytes drain without crossing an `io.Reader` through the port. | Single-fd, single-owner is simpler and removes the duplicate-fd race window. |
 | 18 | Iterator semantics on error? | Yield `(zero, err)` then stop iteration | Matches `iter.Seq2` idiom; caller's `for line, err := range` checks err on each iteration. |
 | 19 | What does `Tailer.Close()` do with a pending uncommitted line? | Discard. Cursor is *not* auto-advanced. | Caller's responsibility. Consistent with "library does not guess durability point". |
 | 20 | `forwardtest` and `watchtest` — same module or separate? | Same module, separate package | One repo, one go.mod. Test helpers don't pollute the main package's surface. |
@@ -1365,7 +1391,7 @@ Where each piece of v1 code maps to v2:
 | v1 | v2 |
 |---|---|
 | `tail.go:18-42` (`Config`) | `watch/watch.go` (`Config`); some fields move to `tail/tail.go` (`Options`) |
-| `tail.go:46-63` (`WaitStatus`) | `watch/watch.go` (`Event` + `PreRotation`; Watcher emits state transitions only, LineReader owns its own fd) |
+| `tail.go:46-63` (`WaitStatus`) | `watch/watch.go` (`Event`; Watcher emits state transitions only, LineReader owns its own fd and drains the previous file to EOF on `ReOpened`) |
 | `tail.go:66-78` (`Watcher`) | `watch/watch.go` (`Watcher`, ctx-aware) |
 | `tail.go:9-14` (`ErrorHandler`) | Removed; replaced by `OnError` callback fields |
 | `line_reader.go:14-28` (`LineReader` struct) | `watch/linereader.go` (rewritten with owned buffer) |
@@ -1385,318 +1411,3 @@ Where each piece of v1 code maps to v2:
 | `line_reader_test.go:119-148` (`TestLineReaderRotate`) | `watch/linereader_test.go` (port) |
 
 Nothing from v1 is wasted. The race-aware rotation logic, the inode-equality identity model, the byte-accurate position tracking — all of it is preserved verbatim in semantics, just packaged better.
-
----
-
-## 11. Deviations
-
-The shipped code is *not* a faithful execution of this plan. Several plan-level
-commitments were quietly dropped, several architectural pivots were taken on
-cleaner paths than the plan described, and several additions appeared that the
-plan never mentioned. This section tracks each delta and, where the deviation
-came out of a review, links to the review section that drove the change.
-
-**Source of truth:** §§3–6, 9 above vs. the v2 source tree as of the
-`v2-design-plan` branch on 2026-05-04. Reviews referenced live in
-[`./reviews/`](./reviews/):
-
-- [`code-review-2026-05-04.md`](./reviews/code-review-2026-05-04.md) — end-to-end code review
-  (2026-05-04).
-- [`perf-review-2026-05-04.md`](./reviews/perf-review-2026-05-04.md) — performance & simplicity
-  review (2026-05-04, closed).
-
-When updating the plan or shipping a new deviation, add the entry here and
-link to the review section that motivated it. Where a deviation predates the
-reviews (i.e. the plan was already wrong by the time reviewers looked), note
-that explicitly rather than fabricating a review back-reference.
-
-### 11.1 Plan promised → not shipped
-
-| Plan reference | What the plan committed | What ships today | Driver |
-|---|---|---|---|
-| Decision #4 | “Drop `golang.org/x/sys` dependency.” | Direct dep is dropped (`go.mod` shows it only `// indirect`), but it is still pulled in transitively by `fsnotify`. Spirit-of-the-plan compliance, not letter. | [perf-review-2026-05-04 §H4](./reviews/perf-review-2026-05-04.md) tightened the stat path to a stdlib-only `statSizeInode` helper, eliminating the last in-tree x/sys touchpoints. The transitive pull from fsnotify remains. |
-
-### 11.2 Architectural pivots (the code took a different path than the plan’s words)
-
-These are **not** missing features — they are conscious deviations where the
-shipped design diverges from the plan’s described shape. Auditors who
-internalised the plan’s mental model first must remap.
-
-1. **`Event.PreRotation` is gone; trailing-bytes drain moved entirely into
-   `LineReader`.**
-   *Plan (§4 L1, §9 Decision #17):* `Event.PreRotation *PreRotation` carries
-   a bounded `io.Reader` exposing trailing bytes from the rotated-out file;
-   the `PreRotation` type is the *only* place an `io.Reader` crosses the
-   Watcher↔consumer port.
-   *Actual:* there is no `PreRotation` type, no `PreRotation` field on
-   `Event`. The single-fd model means the `LineReader` itself owns the only
-   fd and **continues reading the old fd until `io.EOF` after a `ReOpened`
-   event** — only then does it `os.Open` the new path
-   (`watch/linereader.go:194-207`, `:215-251`). The drain semantics are
-   preserved but the API surface that was supposed to expose them is
-   absent.
-   *Driver:* [perf-review-2026-05-04 §H3 (single-fd architecture)](./reviews/perf-review-2026-05-04.md). The duplicate-fd
-   architecture and its race window were eliminated; `PreRotation` was
-   dropped from the public API in the same commit (`45e13fb`).
-
-2. **`RecordSource.Records` (iter form) → `RecordSource.Next` (pull form).**
-   *Plan (§4 L3):*
-   ```go
-   type RecordSource interface {
-       Records(ctx) iter.Seq2[tail.Record, error]
-       Commit(ctx, pos) error
-       Done() <-chan struct{}
-   }
-   ```
-   *Actual:*
-   ```go
-   type RecordSource interface {
-       Next(ctx) (Record, error)
-       Commit(ctx, pos) error
-       Done() <-chan struct{}
-   }
-   ```
-   `Forwarder.Run` calls `Source.Next` directly. The iterator form survives
-   only on `*tail.Tailer.Records`; the cross-package contract is pull-style.
-   *Driver:* [perf-review-2026-05-04 §H1 (drop Forwarder feeder)](./reviews/perf-review-2026-05-04.md). The pull-style
-   `Next` plus per-call `context.WithDeadline` for `MaxBatchAge` lets
-   `Forwarder.Run` honour the age timer without a feeder goroutine,
-   buffered channel, or `recItem` wrapper.
-
-3. **`tail.New` takes a `ctx` parameter.**
-   *Plan (§4 L2):* `func New(opts Options) (*Tailer, error)`
-   *Actual:* `func New(ctx context.Context, opts Options) (*Tailer, error)`
-   The `ctx` governs only startup I/O (`Source.Enumerate`, `Cursor.Load`);
-   the runtime loop uses the per-call ctx of `Next`.
-   *Driver:* [code-review-2026-05-04 Small Polish (`tail/tail.go:121, 136`)](./reviews/code-review-2026-05-04.md), which
-   pointed out that `New` did blocking I/O against `context.Background()`
-   and recommended a ctx parameter or `OpenContext` field.
-
-4. **Atomic-write step ordering.**
-   *Plan (§5.3):* Write tmp → fsync tmp → rename → optional dir-fsync →
-   close tmp. (Close after rename.)
-   *Actual:* Write → fsync → **close** → rename → optional dir-fsync. Closing
-   before rename is the conventional order.
-   *Driver:* [code-review-2026-05-04 §2 (atomicwrite.Write order)](./reviews/code-review-2026-05-04.md). The plan’s
-   “close after rename” wording is now stale; perf-review-2026-05-04’s
-   “File handling & rotation correctness” section confirms the new order
-   as textbook-correct.
-
-### 11.3 Additions the plan never mentioned
-
-The shipped code includes capabilities that don’t appear in the plan. Some
-fix issues the plan ignored; some pre-empt v2.1 items.
-
-1. **`tail.Logrotate(activePath, ...opts)` source.** The plan only describes
-   `tail.Glob(active, backupGlob)` and explicitly calls out the lex-sort
-   bug for double-digit numeric suffixes. The shipped code adds a dedicated
-   `Logrotate` source with descending integer-`N` sort, a sibling-file-naming
-   convention, and its own functional-options pattern.
-   *Driver:* [code-review-2026-05-04 §5 (Glob lex-sort wrong for double-digit suffixes)](./reviews/code-review-2026-05-04.md),
-   which recommended either rejecting `[0-9]*` patterns, adding a
-   comparator, or “offer a `tail.Logrotate` source that knows the
-   numeric-tail convention.” The third option was taken.
-2. **`WithLumberjackSkippedHook(fn)` and `WithLogrotateSkippedHook(fn)`.**
-   These callbacks fire synchronously from `Source.Enumerate` for every
-   compressed (`.gz`) backup the source recognises but cannot expose. Plan
-   Decision #12 deferred all .gz support to v2.1; the shipped code ships
-   *partial* support — detection + observability hook, but no decompression.
-   *Driver:* [code-review-2026-05-04 §4 (Lumberjack `.gz` rejected silently)](./reviews/code-review-2026-05-04.md), which
-   recommended at minimum surfacing the skipped files via an
-   `OnSkippedBackup`-style hook.
-3. **`tail.StaticSource(paths)`.** Replaces the plan’s
-   `tail.MemorySource(paths)` (the immutable variant). The mutable variant
-   was correctly relegated to `tailtest.MemorySource{}`.
-   *Driver:* [perf-review-2026-05-04 §L3 (`MemorySource` naming collision)](./reviews/perf-review-2026-05-04.md), which
-   recommended renaming the immutable variant to disambiguate from the
-   mutating test helper.
-4. **`watch.StatInode(path)` is exported.** Used by `tail.findFileByInode`.
-   The plan’s exported watch API list (§4) does not include it.
-   *Driver:* [perf-review-2026-05-04 §H4 (Unix stat-only inode)](./reviews/perf-review-2026-05-04.md). The per-platform
-   `statSizeInode` helper landed alongside the export so the polling and
-   fsnotify watchers, plus `tail.findFileByInode`, could share a single
-   stat-only path on Unix.
-5. **`forward.WithSinkTimeout[T](d)` is generic.** Plan §5.10 item 7 sketches
-   it as a non-generic helper; actual is parameterised.
-   *Driver:* Pre-review (design-time choice — the helper has to wrap a
-   `Sink[T]`, so it inherits T).
-6. **`OnBackoffSleep(d, attempt)`.** The plan signature is `func(d
-   time.Duration)` (§4 L3 / §5.5); actual takes an additional `attempt int`.
-   *Driver:* Pre-review (shipped before reviews).
-7. **`OnTruncated` fires from two paths.** Plan §5.5 lists exactly one
-   trigger: “File size dropped below current position.” Actual code has
-   two — the watcher-event path *and* a late-detection path inside
-   `LineReader.Next` (the `fi.Size() < l.pos.Offset` block) for
-   copytruncate races the watcher missed. A hook author following the plan
-   may not anticipate the second invocation site.
-   *Driver:* Pre-review (defensive coding for copytruncate races).
-   perf-review-2026-05-04’s “File handling & rotation correctness” section confirms
-   the double-defended copytruncate path.
-8. **Compressed-backup detection ships in v2.0.** Plan Decision #12 deferred
-   to v2.1. Actual code recognises `.gz` variants in both `Lumberjack` and
-   `Logrotate` and surfaces them via the skip-hook (see point 2 above).
-   *Driver:* [code-review-2026-05-04 §4](./reviews/code-review-2026-05-04.md) — same finding as point 2.
-9. **`tail.Options.OnInodeMismatch` hook.** Plan §4 L2 Options list omitted
-   any inode-mismatch hook. The shipped surface adds an observation
-   callback so embedders can wire alerting without parsing logs; fires
-   before the `AllowInodeMismatch` policy decision.
-   *Driver:* Pre-review (shipped alongside the inode-anchor hardening; see
-   §11.5).
-10. **`forward.Options.MaxAttempts int`.** Plan §4 L3 lines 442-443 said
-    transient sink errors retry "indefinitely (or until ctx)". Adding
-    `MaxAttempts` (zero-value 0 = unlimited, preserves plan behaviour) lets
-    callers bound the retry surface — closes ID-4 from
-    [verified-findings-2026-05-04 §ID-4](./reviews/verified-findings-2026-05-04.md).
-    *Driver:* [verified-findings-2026-05-04 §ID-4](./reviews/verified-findings-2026-05-04.md).
-11. **`tail.Options.RequireCursor bool`.** New opt-in safety flag: `New`
-    returns an error when `RequireCursor` is true and `Cursor` is nil. Plan
-    §4 L2 has Cursor-nil silently disable checkpointing; this preserves
-    that default but lets callers fail loudly on a missing cursor (e.g.,
-    YAML mapper bug).
-    *Driver:* [verified-findings-2026-05-04 §SE-7](./reviews/verified-findings-2026-05-04.md).
-
-### 11.4 Subtle semantic deviations
-
-1. **Whence one-shot uses an internal flag, not field mutation.**
-   `tail.openFile` clears `t.whenceUsed` rather than zeroing
-   `Options.Whence`. The plan didn’t specify either way, but the
-   never-mutate-Options choice is explicit.
-   *Driver:* [code-review-2026-05-04 §6 (`Tailer.openFile` mutates `t.opts.Whence`)](./reviews/code-review-2026-05-04.md),
-   which recommended a private flag instead of mutating embedded options;
-   perf-review-2026-05-04’s goroutines/channels inventory likewise endorses the
-   private-flag style.
-2. **`Tailer.Position()` returns the most-recently-yielded record’s
-   position, not a “current logical position without consuming.”** Plan
-   §4 L2 wording suggests the latter. In practice these are the same value
-   between calls to `Next`, but a hook running mid-`Next` (e.g., `OnTruncated`)
-   sees a `Position()` that is *not* yet aligned with the truncation reset
-   — the assignment to `t.cur` happens after the line is yielded, not after
-   each Watcher event.
-   *Driver:* Pre-review (design-time choice; Position() reflects the
-   post-yield invariant the cursor commits against).
-3. **`Whence == io.SeekCurrent` rejected.** Plan §4 L1 line 225 listed it
-   as a valid value alongside `SeekStart` and `SeekEnd`, but no Watcher
-   has handler for it — it silently fell through to `SeekStart` (full-file
-   replay). `tail.New`, `watch.NewPolling`, and `watch.NewFsnotify` now
-   reject it explicitly with an "invalid Whence" error.
-   *Driver:* [verified-findings-2026-05-04 §SE-3](./reviews/verified-findings-2026-05-04.md).
-4. **`BackoffJitter` has no implicit default.** Plan §4 L3 line 471 said
-   `0..1, default 0.2`; the shipped code rewrote `0 → 0.2` in `New`, which
-   made the documented "0 = deterministic" behaviour unreachable. The fix
-   removes the silent rewrite. New contract: 0 (the zero value) is
-   deterministic; callers wanting the conventional ±20% jitter set 0.2
-   explicitly.
-   *Driver:* [verified-findings-2026-05-04 §SE-1](./reviews/verified-findings-2026-05-04.md).
-5. **Negative `tail.Options.Interval` rejected.** Plan §4 L1 line 224 said
-   `0 = 1s default`; `tail.New` previously also coerced negative values to
-   1s. Now negatives return an error from `tail.New`; only zero defaults.
-   *Driver:* [verified-findings-2026-05-04 §SE-11](./reviews/verified-findings-2026-05-04.md).
-6. **Inode-mismatch default is fail-safe (`AllowInodeMismatch=false`).** The
-   §11.3-#? `FailOnInodeMismatch bool` field has been replaced by the
-   inverted `AllowInodeMismatch bool`. Default behaviour: `tail.New` and
-   `watch.NewPolling` return an error wrapping `ErrInodeMismatch` when the
-   cursor's path exists with a different inode. Callers wanting the prior
-   warn-and-resume behaviour set `AllowInodeMismatch: true`. The
-   `OnMissingCheckpoint` policy is consulted only when the mismatch is
-   allowed — otherwise the error short-circuits before policy.
-   *Driver:* [verified-findings-2026-05-04 §ID-3](./reviews/verified-findings-2026-05-04.md).
-7. **`WithFlock(lockPath)` rejects `lockPath == cursorPath`.** Plan §5.4
-   documented the hazard ("renaming over an open, locked file would lose
-   the lock") but `NewFileCursor` did not enforce it; two cooperating
-   processes following the documented "use WithFlock" pattern with the
-   cursor as the lock path would both believe they held an exclusive lock.
-   `NewFileCursor` now compares `filepath.Clean(o.flockPath)` against
-   `filepath.Clean(path)` and errors on equality.
-   *Driver:* [verified-findings-2026-05-04 §SE-2](./reviews/verified-findings-2026-05-04.md).
-8. **`WithFileMode` validates the mode bits.** Plan §5.3 specifies only
-   the default `0o600` and is silent on validation. `NewFileCursor` now
-   rejects modes with group-write (`0o020`), world-write (`0o002`), or
-   special bits (setuid/setgid/sticky) — these defeat the cursor's
-   integrity guarantees in shared-FS deployments.
-   *Driver:* [verified-findings-2026-05-04 §SE-8](./reviews/verified-findings-2026-05-04.md).
-9. **`WithSyncBackgroundInterval` requires `WithSyncMode(SyncBackground)`.**
-   Plan §4 L2 line 331 listed the option without a coupling constraint;
-   the consumer in `NewFileCursor` only reads `o.syncInterval` inside the
-   `SyncBackground` branch, so an interval set without the mode was dead
-   config. `NewFileCursor` now errors on the misconfiguration so the
-   caller catches the bug at construction time.
-   *Driver:* [verified-findings-2026-05-04 §SE-10](./reviews/verified-findings-2026-05-04.md).
-10. **`Decoder` returning a wrapped `ErrPermanent` aborts `Run`.** Plan §4
-    L3 line 452 said decode errors "advance past the line"; the shipped
-    decoders.go godoc claims `ErrPermanent` aborts. `Forwarder.Run` now
-    honours that godoc: when `errors.Is(derr, ErrPermanent)` is true the
-    cursor does *not* advance and `Run` returns the wrapping error.
-    *Driver:* [verified-findings-2026-05-04 §SE-9](./reviews/verified-findings-2026-05-04.md).
-11. **Cursor tmp + flock open use `O_NOFOLLOW` (Unix) / reparse-point
-    refusal (Windows).** Plan §5.2 line 593 says v2 *follows symlinks*
-    when tailing log files (we tail the target, not the link). That policy
-    applies only to the read path; the cursor's `<path>.tmp` and the
-    flock's `<lockPath>` are write paths the library owns and must not
-    redirect through symlinks. `internal/atomicwrite/openTmp_unix.go` adds
-    `O_EXCL|O_NOFOLLOW` plus a stale-tmp pre-removal step;
-    `tail/flock_unix.go` adds `O_NOFOLLOW`; the Windows variants refuse
-    reparse points via `os.Lstat` before opening.
-    *Driver:* [verified-findings-2026-05-04 §ID-1, §ID-2](./reviews/verified-findings-2026-05-04.md).
-12. **Negative `forward.Options` batch limits rejected.** Plan §4 L3 lines
-    464-466 specified the three batch-bound fields without ranges; the
-    validator only checked the all-zero case. `forward.New` now also
-    rejects `MaxBatchRecords < 0`, `MaxBatchBytes < 0`, and
-    `MaxBatchAge < 0`.
-    *Driver:* [verified-findings-2026-05-04 §SE-4](./reviews/verified-findings-2026-05-04.md).
-
-### 11.5 Plan-vs-shipped impact summary
-
-For an auditor or implementer reasoning from this plan, the highest-impact
-deltas are:
-
-- **`PreRotation` doesn’t exist**; the trailing-bytes invariant is
-  preserved by `LineReader` keeping the old fd open (§11.2 #1). Any
-  reasoning about rotation correctness must be against the LineReader
-  drain, not the plan’s `PreRotation.Reader`.
-- **`WithSyncMode` now ships** (`SyncAlways`, `SyncOnCommit`, `SyncBackground`
-  via `Syncer` extension interface — §E1). Driving req 2c is fully met.
-- **`WithCursorMigration` now ships** (§C1): schema bumps can land with a
-  user-supplied migrator; `ErrUnsupportedCursorVersion` is still the sentinel
-  when no migrator is configured.
-- **`forward.OnBatchSent` carries `(records, bytes, pos, latency)`** —
-  superset of the plan's three-arg signature plus the runtime-useful
-  position. Latency is the duration of the successful `Sink.Send` only
-  (excludes batch fill and failed retries).
-- **`forward.RecordSource` is pull-style** (§11.2 #2): third-party
-  sources must implement `Next`, not `Records`.
-- **Forwarder exhaustion honours both paths**: `tail.ErrSourceExhausted`
-  from `Next` *and* `RecordSource.Done()` closing. A 3rd-party source that
-  signals exhaustion via `Done()` will terminate `Run` cleanly; in-flight
-  retries continue against the parent ctx so the last batch is still
-  delivered.
-- **Compressed-backup behaviour is partial** (§11.3 #2, §11.3 #9):
-  detection-and-skip ships, decompression does not. A checkpoint pointing
-  at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy.
-- **`ErrInodeMismatch` is the fail-safe default**: re-exported as
-  `tail.ErrInodeMismatch`, returned from `tail.New` when the cursor's path
-  still exists with a different inode (§11.4 #6). `Options.OnInodeMismatch`
-  observes the event; `Options.AllowInodeMismatch=true` opts out of the
-  default error and falls through to `OnMissingCheckpoint` policy. The
-  watcher config exposes the same pair as `Config.OnInodeMismatch` and
-  `Config.AllowInodeMismatch` for direct watch users.
-- **Hardening cluster (verified-findings 2026-05-04).** A bundle of
-  validator/symlink-safety changes landed together and shifts §4 surfaces
-  in small but non-trivial ways. Each item links to its own §11 entry:
-  rejected `Whence == io.SeekCurrent` (§11.4 #3), `BackoffJitter` no
-  longer auto-defaults to 0.2 (§11.4 #4), `Interval < 0` rejected
-  (§11.4 #5), inode-mismatch fail-safe default (§11.4 #6), `WithFlock`
-  rejects same-as-cursor path (§11.4 #7), `WithFileMode` rejects unsafe
-  modes (§11.4 #8), `WithSyncBackgroundInterval` requires the matching
-  mode (§11.4 #9), Decoder `ErrPermanent` aborts (§11.4 #10), `O_NOFOLLOW`
-  on cursor tmp + flock open (§11.4 #11), negative batch limits rejected
-  (§11.4 #12), plus new fields `RequireCursor` (§11.3 #11) and
-  `MaxAttempts` (§11.3 #10).
-- **`forward.Options.OnDropped` intentionally absent at L3.** File drops
-  happen inside `Tailer` (during `openFile`/`OnMissingCheckpoint`) before
-  records reach the `Forwarder`. The L3 layer has no surface to detect
-  drops; adding one would require a new channel on `Tailer` and a
-  `select`-arm in `Forwarder.Run` (~80 LOC architectural change) for a
-  hook that already exists on `tail.Options.OnDropped`. Decision: L3 does
-  not duplicate L2 hooks. Callers needing drop accounting should wire
-  `tail.Options.OnDropped` alongside the `Forwarder`. The §4 L3 Options
-  list has been updated to remove `OnDropped`.

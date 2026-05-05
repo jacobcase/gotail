@@ -2,18 +2,11 @@
 
 ## Design plan
 
-The v2 design plan lives at `docs/v2-plan.md`. The shipped code drifts
-from the plan in places; track every divergence in the
-`## 11. Deviations` section at the end of the plan.
-
-Whenever a change lands that takes the code further from (or back toward)
-the plan, add or update an entry under §11.1–§11.5 with:
-
-- the plan reference being deviated from (e.g. `§4 L3 Options`),
-- what ships now versus what the plan promised, and
-- a *Driver:* line linking to the review section or other source that
-  motivated the change. If no review drove it, say *Pre-review
-  (design-time choice)* or similar — never fabricate a back-reference.
+The v2 design plan lives at `docs/v2-plan.md`. The plan is a snapshot of
+the current desired design state — it describes what the code does now,
+not its history. When a change lands that alters a documented design
+choice, edit the relevant section in place; do not keep "previously X,
+now Y" notes or maintain a separate deviations log.
 
 ## Reviews
 
@@ -28,6 +21,6 @@ When running Trail of Bits security skills, write all findings reports to ./docs
 
 Each review starts with a **Conducted** date and (when closed) a
 **Closed** date in the header. New reviews go in the same directory
-following the same header convention. When a review's findings translate
-into deviations from `docs/v2-plan.md`, also record them in the plan's
-Deviations section with a link back to the review.
+following the same header convention. When a review's findings change
+the design described in `docs/v2-plan.md`, edit the plan in place to
+match the new design.
