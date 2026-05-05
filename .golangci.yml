@@ -8,3 +8,26 @@ linters:
   enable:
     - errcheck
     - ineffassign
+  settings:
+    errcheck:
+      # Idiomatic ignores: Close on cleanup paths, best-effort Remove of
+      # tmp files in atomicwrite error paths. errcheck does not infer
+      # interface satisfaction, so concrete types that fall outside
+      # (io.Closer) / (*os.File) need to be listed explicitly.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*github.com/fsnotify/fsnotify.Watcher).Close
+        - os.Remove
+  exclusions:
+    rules:
+      # errcheck on test files is mostly noise: t.Cleanup closures,
+      # WriteFile/WriteString fixture setup, defer x.Close, etc.
+      - path: _test\.go
+        linters:
+          - errcheck
+      # cmd/gotail is a tiny CLI demo, not a shipped binary; bufio
+      # stdout writes and cleanup Close are conventional fire-and-forget.
+      - path: cmd/gotail/
+        linters:
+          - errcheck
