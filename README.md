@@ -461,16 +461,6 @@ The detailed design lives in [`docs/v2-plan.md`](docs/v2-plan.md). When
 the shipped code drifts from the plan, the divergence is recorded in
 the plan's `## 11. Deviations` section.
 
-## v1 → v2 migration
-
-| v1 concept | v2 equivalent |
-|------------|---------------|
-| `gotail.NewPoller(path)` → `io.ReadCloser` | `tail.New(ctx, opts)` → `*Tailer` |
-| Manual rotation handling | Automatic; `OnRotated` hook available |
-| No checkpoints | `tail.NewFileCursor` / `tail.NewMemoryCursor` |
-| No line framing | `watch.NewLineReader` (used internally by Tailer) |
-| No multi-file backfill | `tail.Lumberjack`, `tail.Logrotate`, `tail.Glob` |
-| No batched forwarding | `forward.Forwarder[T]` |
 
 ## Docs
 
