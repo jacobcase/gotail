@@ -307,6 +307,69 @@ func TestFileCursor_Flock_CrossProcess(t *testing.T) {
 	testFlockCrossProcess(t)
 }
 
+// TestFileCursor_Flock_SymlinkFollow (ID-2): flock open must not follow a
+// pre-positioned symlink at lockPath.
+func TestFileCursor_Flock_SymlinkFollow(t *testing.T) {
+	testFlockSymlinkFollow(t)
+}
+
+// TestFileCursor_Flock_SameAsCursorPath (SE-2): using the cursor path as the
+// flock path silently breaks mutual exclusion after the first Save (the atomic
+// rename orphans the held fd). NewFileCursor must reject this configuration.
+func TestFileCursor_Flock_SameAsCursorPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cursor.json")
+
+	_, err := tail.NewFileCursor(path, tail.WithFlock(path))
+	if err == nil {
+		t.Fatal("WithFlock with same path as cursor: want error, got nil")
+	}
+}
+
+// TestWithFileMode_RejectsUnsafeModes (SE-8): WithFileMode must reject modes
+// that have group-write, world-write, or special (setuid/setgid/sticky) bits.
+func TestWithFileMode_RejectsUnsafeModes(t *testing.T) {
+	dir := t.TempDir()
+
+	cases := []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"world-writable", 0o666},
+		{"group-writable", 0o610},
+		{"world-and-group-writable", 0o622},
+		{"setuid", 0o4600},
+		{"setgid", 0o2600},
+		{"sticky", 0o1600},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, tc.name+".cursor")
+			_, err := tail.NewFileCursor(path, tail.WithFileMode(tc.mode))
+			if err == nil {
+				t.Fatalf("WithFileMode(%04o): want error, got nil", tc.mode)
+			}
+		})
+	}
+}
+
+// TestFileCursor_SyncBackgroundIntervalWithoutMode (SE-10):
+// WithSyncBackgroundInterval is silently ignored when the sync mode is not
+// SyncBackground. NewFileCursor must return an error in that case so the
+// misconfiguration is caught at construction time.
+func TestFileCursor_SyncBackgroundIntervalWithoutMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cursor.json")
+
+	_, err := tail.NewFileCursor(path,
+		tail.WithSyncBackgroundInterval(10*tail.DefaultSyncBackgroundInterval),
+		// WithSyncMode(tail.SyncBackground) intentionally omitted.
+	)
+	if err == nil {
+		t.Fatal("WithSyncBackgroundInterval without SyncBackground mode: want error, got nil")
+	}
+}
+
 // ── Phase C: WithCursorMigration ─────────────────────────────────────────────
 
 func TestFileCursor_WithCursorMigration_FromV0(t *testing.T) {

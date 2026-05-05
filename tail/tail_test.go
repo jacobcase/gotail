@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1600,3 +1601,117 @@ func (f *failingSaveCursor) Save(_ context.Context, _ tail.Checkpoint) error {
 	return errors.New("save failed: test error")
 }
 func (f *failingSaveCursor) Close() error { return nil }
+
+// ── Security / hardening regression tests ────────────────────────────────────
+
+// TestNew_RequireCursor_NilErrors (SE-7): when RequireCursor is set, New must
+// return an error instead of silently disabling checkpointing.
+func TestNew_RequireCursor_NilErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, []byte("line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := tail.New(context.Background(), tail.Options{
+		Source:        tail.SingleFile(path),
+		Interval:      10 * time.Millisecond,
+		RequireCursor: true,
+		// Cursor: nil (intentionally omitted)
+	})
+	if err == nil {
+		t.Fatal("RequireCursor=true with nil Cursor: want error, got nil")
+	}
+}
+
+// TestNew_FailOnInodeMismatch_DefaultEnabled (ID-3): FailOnInodeMismatch must
+// default to true (fail-safe). With default Options an inode swap must cause
+// New to return an error wrapping ErrInodeMismatch.
+func TestNew_FailOnInodeMismatch_DefaultEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, []byte("line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cur := tail.NewMemoryCursor()
+	ctx := context.Background()
+
+	// First tailer: read one line and checkpoint (captures the real inode).
+	tr, err := tail.New(ctx, tail.Options{
+		Source:    tail.SingleFile(path),
+		Cursor:    cur,
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	})
+	if err != nil {
+		t.Fatalf("first New: %v", err)
+	}
+	rec, err := tr.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if err := tr.Commit(ctx, rec.Pos); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	tr.Close()
+
+	// Rotate: remove the file and create a new one at the same path; the new
+	// file gets a different inode from the OS.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("new-content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second tailer with default Options (FailOnInodeMismatch unset / false).
+	// Under the new fail-safe default this must error with ErrInodeMismatch.
+	_, err = tail.New(ctx, tail.Options{
+		Source:   tail.SingleFile(path),
+		Cursor:   cur,
+		Interval: 10 * time.Millisecond,
+	})
+	if !errors.Is(err, tail.ErrInodeMismatch) {
+		t.Fatalf("default options after inode swap: want ErrInodeMismatch, got %v", err)
+	}
+}
+
+// TestNew_RejectsNegativeInterval (SE-11): a negative Interval must be
+// rejected by New, not silently coerced to 1s.
+func TestNew_RejectsNegativeInterval(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := tail.New(context.Background(), tail.Options{
+		Source:   tail.SingleFile(path),
+		Interval: -time.Second,
+	})
+	if err == nil {
+		t.Fatal("Interval=-1s: want error, got nil")
+	}
+}
+
+// TestNew_RejectsSeekCurrent (SE-3): io.SeekCurrent is accepted by the
+// validator but falls through to SeekStart semantics (full-file replay).
+// New must reject it explicitly so callers get a clear error.
+func TestNew_RejectsSeekCurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := tail.New(context.Background(), tail.Options{
+		Source:   tail.SingleFile(path),
+		Interval: 10 * time.Millisecond,
+		Whence:   io.SeekCurrent,
+	})
+	if err == nil {
+		t.Fatal("Whence=io.SeekCurrent: want error, got nil")
+	}
+}
+

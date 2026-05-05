@@ -56,6 +56,10 @@ func testFlockCrossProcess(t *testing.T) {
 	t.Skip("cross-process flock test not yet ported to Windows (LockFileEx semantics differ from POSIX flock)")
 }
 
+func testFlockSymlinkFollow(t *testing.T) {
+	t.Skip("symlink-follow flock test not applicable on Windows (reparse points differ from POSIX symlinks)")
+}
+
 func testFlockPIDInFile(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()

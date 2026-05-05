@@ -71,6 +71,9 @@ type Options[T any] struct {
 	// (current behaviour, rand in [0, ceiling)). Default is 0.2 (±20% around
 	// 0.8×ceiling). Negative or >1 is rejected by [New].
 	BackoffJitter float64
+	// MaxAttempts is the maximum number of Sink.Send calls per batch before
+	// Run gives up and returns an error. 0 means no limit (current default).
+	MaxAttempts int
 
 	Logger *slog.Logger
 

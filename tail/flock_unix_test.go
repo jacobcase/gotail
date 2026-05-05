@@ -168,6 +168,39 @@ func testFlockCrossProcess(t *testing.T) {
 	}
 }
 
+// testFlockSymlinkFollow (ID-2): acquireFlock must not follow a pre-positioned
+// symlink at lockPath. Currently os.OpenFile uses no O_NOFOLLOW, so it opens
+// through the symlink and truncates the target. The fix adds O_NOFOLLOW.
+func testFlockSymlinkFollow(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+
+	target := filepath.Join(dir, "innocent.dat")
+	if err := os.WriteFile(target, []byte("untouched"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := filepath.Join(dir, "cursor.lock")
+	if err := os.Symlink(target, lockPath); err != nil {
+		t.Fatal(err)
+	}
+
+	cursorPath := filepath.Join(dir, "cursor.json")
+	c, err := tail.NewFileCursor(cursorPath, tail.WithFlock(lockPath))
+	if err == nil {
+		c.Close()
+		t.Fatal("WithFlock through pre-positioned symlink: want error, got nil")
+	}
+
+	got, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("ReadFile target: %v", readErr)
+	}
+	if string(got) != "untouched" {
+		t.Fatalf("symlink target was truncated/written: got %q", got)
+	}
+}
+
 func testFlockPIDInFile(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()

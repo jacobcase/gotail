@@ -8,3 +8,4 @@ func testFlockConflict(t *testing.T)        { t.Skip("flock not supported on thi
 func testFlockReleasedOnClose(t *testing.T) { t.Skip("flock not supported on this platform") }
 func testFlockPIDInFile(t *testing.T)       { t.Skip("flock not supported on this platform") }
 func testFlockCrossProcess(t *testing.T)    { t.Skip("flock not supported on this platform") }
+func testFlockSymlinkFollow(t *testing.T)   { t.Skip("flock not supported on this platform") }

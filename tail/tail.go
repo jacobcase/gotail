@@ -86,6 +86,10 @@ type Options struct {
 	// patterns. Use this when the caller wants explicit failure on resume
 	// divergence (and a chance to errors.Is the result).
 	FailOnInodeMismatch bool
+	// RequireCursor causes [New] to return an error when Cursor is nil.
+	// Use this to prevent accidental deployment without checkpointing
+	// (e.g. a nil cursor from a missing YAML field).
+	RequireCursor bool
 
 	// Hooks — all optional and nil-safe. Hooks are invoked synchronously
 	// from the read loop and must not block; offload slow work to a

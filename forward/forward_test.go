@@ -1048,3 +1048,153 @@ func TestForwarder_CtxCancelStillReturnsCtxErr(t *testing.T) {
 		t.Fatalf("Run: want context.Canceled, got %v", err)
 	}
 }
+
+// ── Security / hardening regression tests ────────────────────────────────────
+
+// TestNew_BackoffJitter_ZeroIsDeterministic (SE-1): BackoffJitter=0 must mean
+// "deterministic" per the doc (all sleeps == ceiling). Currently New rewrites
+// 0 → 0.2, so sleeps are randomly in [0.8·ceiling, ceiling) and this test
+// will fail until the silent rewrite is removed.
+func TestNew_BackoffJitter_ZeroIsDeterministic(t *testing.T) {
+	const ceiling = 50 * time.Millisecond
+	var sleeps []time.Duration
+
+	sink := forward.SinkFunc[[]byte](func(_ context.Context, _ [][]byte) error {
+		return errors.New("retryable")
+	})
+	fwd := mustNewForwarder(t, forward.Options[[]byte]{
+		Source:          &backoffSource{n: 1},
+		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:            sink,
+		MaxBatchRecords: 1,
+		InitialBackoff:  ceiling,
+		MaxBackoff:      ceiling,
+		BackoffJitter:   0, // must mean deterministic (always ceiling), not default 0.2
+		OnBackoffSleep:  func(d time.Duration, _ int) { sleeps = append(sleeps, d) },
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- fwd.Run(ctx) }()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+
+	if len(sleeps) == 0 {
+		t.Skip("no backoff sleeps observed — test too fast")
+	}
+	for i, d := range sleeps {
+		if d != ceiling {
+			t.Fatalf("BackoffJitter=0 sleep[%d]=%v, want deterministic %v (got jitter)", i, d, ceiling)
+		}
+	}
+}
+
+// TestNew_RejectsNegativeBatchLimits (SE-4): negative batch-limit values must
+// be rejected by New. Currently the validator only checks == 0, so any
+// negative value passes and disables flushing silently.
+func TestNew_RejectsNegativeBatchLimits(t *testing.T) {
+	src := &backoffSource{n: 1}
+	sink := forward.SinkFunc[[]byte](func(_ context.Context, _ [][]byte) error { return nil })
+	decoder := forward.Decoder[[]byte](forward.IdentityDecoderCopy)
+
+	cases := []struct {
+		name string
+		opts forward.Options[[]byte]
+	}{
+		{
+			"negative MaxBatchRecords",
+			forward.Options[[]byte]{
+				Source: src, Decoder: decoder, Sink: sink,
+				MaxBatchRecords: -1,
+			},
+		},
+		{
+			"negative MaxBatchBytes",
+			forward.Options[[]byte]{
+				Source: src, Decoder: decoder, Sink: sink,
+				MaxBatchRecords: 1, MaxBatchBytes: -1,
+			},
+		},
+		{
+			"negative MaxBatchAge",
+			forward.Options[[]byte]{
+				Source: src, Decoder: decoder, Sink: sink,
+				MaxBatchRecords: 1, MaxBatchAge: -time.Second,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := forward.New(tc.opts)
+			if err == nil {
+				t.Fatalf("%s: want error from New, got nil", tc.name)
+			}
+		})
+	}
+}
+
+// TestForwarder_MaxAttemptsLimitsRetries (ID-4): when MaxAttempts is set, Run
+// must stop retrying after that many Sink.Send calls and return an error.
+// Currently MaxAttempts is not implemented; Run loops until ctx expires.
+func TestForwarder_MaxAttemptsLimitsRetries(t *testing.T) {
+	var sendCalls int
+	sink := forward.SinkFunc[[]byte](func(_ context.Context, _ [][]byte) error {
+		sendCalls++
+		return errors.New("transient")
+	})
+
+	const maxAttempts = 3
+	fwd := mustNewForwarder(t, forward.Options[[]byte]{
+		Source:          &backoffSource{n: 1},
+		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:            sink,
+		MaxBatchRecords: 1,
+		MaxAttempts:     maxAttempts,
+		InitialBackoff:  time.Millisecond,
+		MaxBackoff:      5 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := fwd.Run(ctx)
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Fatalf("Run hit context deadline instead of MaxAttempts cap; sendCalls=%d", sendCalls)
+	}
+	if err == nil {
+		t.Fatalf("Run: want non-nil error after MaxAttempts=%d, got nil", maxAttempts)
+	}
+	if sendCalls != maxAttempts {
+		t.Fatalf("want %d sink calls (MaxAttempts), got %d", maxAttempts, sendCalls)
+	}
+}
+
+// TestForwarder_DecoderPermanentError_AbortsRun (SE-9): when the Decoder
+// returns a wrapped ErrPermanent, Run must return that error immediately.
+// Currently the permanent flag is never checked; the line is silently skipped,
+// the cursor advances, and Run returns nil. This test will pass once the
+// ErrPermanent check is wired into the decode path.
+func TestForwarder_DecoderPermanentError_AbortsRun(t *testing.T) {
+	decoder := forward.Decoder[[]byte](func(_ []byte) ([]byte, error) {
+		return nil, fmt.Errorf("schema rejected: %w", forward.ErrPermanent)
+	})
+	sink := forward.SinkFunc[[]byte](func(_ context.Context, _ [][]byte) error { return nil })
+
+	fwd := mustNewForwarder(t, forward.Options[[]byte]{
+		Source:          &backoffSource{n: 1},
+		Decoder:         decoder,
+		Sink:            sink,
+		MaxBatchRecords: 1,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := fwd.Run(ctx)
+	if !errors.Is(err, forward.ErrPermanent) {
+		t.Fatalf("Decoder returns ErrPermanent: want Run to return wrapping error, got %v", err)
+	}
+}
