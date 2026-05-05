@@ -159,6 +159,71 @@ func TestLineReader_Rotate_DrainsTrailingBytes(t *testing.T) {
 	}
 }
 
+// TestLineReader_Rotate_YieldsPartialLineBeforeSwitch pins the contract
+// that an unterminated tail on the rotated-out inode is yielded as a
+// complete line on the rotation boundary, with a position at the old
+// inode's end. The new file's first line then arrives cleanly framed
+// with a position relative to its own offset.
+func TestLineReader_Rotate_YieldsPartialLineBeforeSwitch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "partial.log")
+
+	// Old inode content: one complete line and one unterminated tail.
+	old := []byte("complete\npartial-no-newline")
+	if err := os.WriteFile(path, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pos := watch.Position{File: path}
+	w := &scriptedWatcher{events: []watch.Event{
+		{Path: path, Pos: pos, ReOpened: true},
+		{Path: path, Pos: pos, ReOpened: true},
+	}}
+	lr := newLR(t, w, watch.LineOptions{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if got := nextLine(t, ctx, lr); got != "complete" {
+		t.Fatalf("first yield: want complete, got %q", got)
+	}
+
+	// Rotate before the LineReader observes the second event.
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("after-rotation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The unterminated tail must surface as its own line, with a position
+	// at the end of the old inode.
+	line, p, err := lr.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if string(line) != "partial-no-newline" {
+		t.Fatalf("partial yield: want %q, got %q", "partial-no-newline", line)
+	}
+	if p.Offset != int64(len(old)) {
+		t.Fatalf("partial pos.Offset = %d, want %d (old inode end)", p.Offset, len(old))
+	}
+
+	// The new file's first line must come next, cleanly framed and with
+	// a position relative to the new file (offset == its line length).
+	line, p, err = lr.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if string(line) != "after-rotation" {
+		t.Fatalf("post-switch yield: want after-rotation, got %q", line)
+	}
+	if p.Offset != int64(len("after-rotation\n")) {
+		t.Fatalf("post-switch pos.Offset = %d, want %d (offset within new file)",
+			p.Offset, len("after-rotation\n"))
+	}
+}
+
 // TestLineReader_LongLineNoNewline exercises skipToNewline: a line that
 // fills the buffer to MaxLine without a newline forces the
 // `buffered >= MaxLine` branch in Next, which calls skipToNewline. The

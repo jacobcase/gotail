@@ -135,7 +135,17 @@ func (l *LineReader) Next(ctx context.Context) (line []byte, pos Position, err e
 			}
 			// Source hit EOF.
 			if l.pendingNewFile != "" {
-				// Done draining the old file — open the new one.
+				// Drain done. An unterminated tail on the rotated-out
+				// inode is yielded as a complete line with that inode's
+				// position before switching — the rotation is an
+				// implicit newline for bytes that will never see a
+				// real one.
+				if l.head < l.tail {
+					line := l.buf[l.head:l.tail]
+					l.pos.Offset += int64(l.tail - l.head)
+					l.head = l.tail
+					return l.trimLine(line), l.pos, nil
+				}
 				if err := l.openNewFile(); err != nil {
 					return nil, l.pos, err
 				}
@@ -241,12 +251,10 @@ func (l *LineReader) switchToFile(path string, pos Position) error {
 	l.f = f
 	l.src = f
 	l.pos = pos
-	// Reset buffer only if empty — preserves a partial line that might span
-	// the rotation boundary (rare but correct).
-	if l.head == l.tail {
-		l.head = 0
-		l.tail = 0
-	}
+	// Both call sites enter with head==tail (first-open is fresh; the
+	// drain branch in Next has already consumed any buffered bytes).
+	l.head = 0
+	l.tail = 0
 	return nil
 }
 
