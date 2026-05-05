@@ -1,7 +1,10 @@
 # Metrics: OpenTelemetry
 
-Wire gotail hooks to OpenTelemetry counters. No gotail dependency on OTel —
-all wiring is in your application code.
+Wire gotail hooks to OpenTelemetry counters. No gotail dependency on
+OTel — all wiring is in your application code. The hook signatures
+(`OnRotated`, `OnTruncated`, `OnCheckpoint`, `OnBatchSent`,
+`OnSendError`, `OnDecodeError`) are part of the public API in
+`tail.Options` and `forward.Options[T]`.
 
 ```go
 import (
@@ -19,6 +22,7 @@ type Metrics struct {
     bytesShipped   metric.Int64Counter
     rotations      metric.Int64Counter
     truncations    metric.Int64Counter
+    checkpoints    metric.Int64Counter
     batchesSent    metric.Int64Counter
     sendErrors     metric.Int64Counter
     decodeErrors   metric.Int64Counter
@@ -46,6 +50,10 @@ func NewMetrics() (*Metrics, error) {
         metric.WithDescription("Truncation events")); err != nil {
         return nil, err
     }
+    if m.checkpoints, err = meter.Int64Counter("gotail.checkpoints",
+        metric.WithDescription("Number of checkpoint writes")); err != nil {
+        return nil, err
+    }
     if m.batchesSent, err = meter.Int64Counter("gotail.batches_sent",
         metric.WithDescription("Batches delivered to sink")); err != nil {
         return nil, err
@@ -69,6 +77,7 @@ func (m *Metrics) TailerOpts(base tail.Options) tail.Options {
     ctx := context.Background()
     base.OnRotated = func(_, _ tail.Position) { m.rotations.Add(ctx, 1) }
     base.OnTruncated = func(_ tail.Position) { m.truncations.Add(ctx, 1) }
+    base.OnCheckpoint = func(_ tail.Checkpoint) { m.checkpoints.Add(ctx, 1) }
     return base
 }
 

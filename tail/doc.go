@@ -54,7 +54,7 @@
 //
 // # Usage
 //
-//	cur, _ := tail.NewFileCursor("/var/run/myapp.cursor")
+//	cur, _ := tail.NewFileCursor("/var/lib/myapp/cursor.json")
 //	t, _ := tail.New(ctx, tail.Options{
 //	    Source: tail.SingleFile("/var/log/app.log"),
 //	    Cursor: cur,

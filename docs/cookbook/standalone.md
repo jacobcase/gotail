@@ -1,60 +1,88 @@
-# Cookbook: Standalone slog writer
+# Cookbook: Standalone watch usage
 
-Use the `watch` package directly to tail a file and emit structured log records
-without going through a `Tailer`. Useful for lightweight integrations that only
-need raw lines, not durable checkpointing.
+Use the `watch` package directly when you want raw lines from a single
+file with no checkpoint persistence and no multi-file enumeration —
+roughly the shape of `tail -F`. Most callers should reach for the L2
+`tail` package instead; this cookbook is for cases where the extra
+machinery is genuinely unwanted.
 
 ```go
 package main
 
 import (
     "context"
+    "errors"
+    "fmt"
     "io"
     "log/slog"
     "os"
+    "os/signal"
+    "syscall"
     "time"
 
     "github.com/jacobcase/gotail/v2/watch"
 )
 
 func main() {
-    logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
 
-    w, err := watch.NewPolling(watch.Config{
-        Path:     "/var/log/app.log",
-        Interval: 500 * time.Millisecond,
-        Whence:   io.SeekEnd, // only new lines
+    // watch.New auto-selects fsnotify (Linux/macOS/BSD) and falls back to
+    // polling on Windows or when the gotail_nofsnotify build tag is set.
+    w, err := watch.New(watch.Config{
+        Path:     "/var/log/myapp.log",
+        Interval: time.Second, // poll cadence; ignored when fsnotify is selected
+        Whence:   io.SeekEnd,  // tail only new content (use io.SeekStart to read history)
     })
     if err != nil {
-        logger.Error("watcher", "err", err)
+        slog.Error("watcher", "err", err)
         os.Exit(1)
     }
 
-    lr := watch.NewLineReader(w, watch.LineOptions{})
+    lr := watch.NewLineReader(w, watch.LineOptions{
+        // Defaults are 64 KiB read buffer and 1 MiB MaxLine. Override
+        // only if you have measured a specific need.
+        OnTruncated: func(at watch.Position) {
+            slog.Warn("file truncated, resetting to offset 0", "prev_offset", at.Offset)
+        },
+    })
     defer lr.Close()
 
-    ctx := context.Background()
     for {
         line, pos, err := lr.Next(ctx)
         if err != nil {
-            if ctx.Err() != nil {
-                break
+            if errors.Is(err, ctx.Err()) || ctx.Err() != nil {
+                return
             }
-            logger.Error("read error", "err", err)
-            continue
+            if errors.Is(err, watch.ErrLineTooLong) {
+                // Reader has already skipped to the next newline; keep going.
+                slog.Warn("dropped over-long line", "offset", pos.Offset)
+                continue
+            }
+            slog.Error("read error", "err", err)
+            return
         }
-        logger.Info("line", "text", string(line), "offset", pos.Offset)
+        // line aliases LineReader's internal buffer — copy if you need to
+        // retain it past the next Next call.
+        fmt.Printf("%d\t%s\n", pos.Offset, line)
     }
 }
 ```
 
 ## Notes
 
-- `watch.LineReader` owns its read buffer; copy `line` if you need to retain it
-  past the next `Next` call.
-- `watch.LineOptions.KeepNewline` includes the trailing `\n` in the returned
-  slice if you need it.
-- Switch to `watch.New` instead of `watch.NewPolling` for OS-native,
-  sub-millisecond event latency. The fsnotify backend is compiled in by
-  default; `watch.New` falls back to polling when unavailable. Drop the
-  dependency with `-tags gotail_nofsnotify` if needed.
+- **Buffer ownership.** `line` is valid only until the next call to
+  `Next` or `Close`. Copy it before retaining.
+- **Backend selection.** `watch.New` prefers fsnotify (sub-millisecond
+  latency on Linux/macOS/BSD) and falls back to polling. Use
+  `watch.NewPolling` directly to force polling on platforms that support
+  fsnotify; use `watch.NewFsnotify` directly to surface
+  `ErrUnsupported` rather than fall back.
+- **`KeepNewline`.** Setting `LineOptions.KeepNewline = true` includes
+  the trailing `\n` in returned slices. Useful when piping to writers
+  that expect newline-terminated frames.
+- **No persistence.** Restarting this program reopens the file at
+  `Whence`; there is no resume across restarts. Use the `tail` package
+  with a `Cursor` if you need durability — see the
+  [HTTPS forwarder cookbook](https-forwarder.md) for an end-to-end
+  example.

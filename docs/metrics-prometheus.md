@@ -1,7 +1,10 @@
 # Metrics: Prometheus
 
-Wire gotail hooks to Prometheus counters and histograms. No gotail dependency
-on the Prometheus client — all wiring is in your application code.
+Wire gotail hooks to Prometheus counters and histograms. No gotail
+dependency on the Prometheus client — all wiring is in your application
+code. The hook signatures (`OnRotated`, `OnTruncated`, `OnCheckpoint`,
+`OnBatchSent`, `OnSendError`, `OnDecodeError`) are part of the public API
+in `tail.Options` and `forward.Options[T]`.
 
 ```go
 import (
