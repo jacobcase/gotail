@@ -53,6 +53,64 @@ func TestWrite_Overwrite(t *testing.T) {
 	}
 }
 
+// TestWrite_RejectsDirectoryAtTmp verifies openTmp's "non-regular file"
+// branch: if a directory is squatting at path+".tmp", Write must refuse
+// rather than removing it (an attacker could otherwise plant a directory
+// to redirect Write through path traversal on the Remove + recreate path).
+func TestWrite_RejectsDirectoryAtTmp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.dat")
+	tmp := path + ".tmp"
+
+	if err := os.Mkdir(tmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := atomicwrite.Write(path, []byte("data"), 0o600, false); err == nil {
+		t.Fatal("expected Write to fail when a directory squats at the tmp path")
+	}
+
+	fi, err := os.Stat(tmp)
+	if err != nil {
+		t.Fatalf("Stat tmp: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Fatal("squatting directory was removed by Write — must be left intact")
+	}
+}
+
+// TestWrite_RenameFails_DestIsNonEmptyDir exercises the os.Rename failure
+// branch: if the destination path is a non-empty directory, the rename
+// fails after the tmp file was successfully written, and Write must clean
+// up the orphaned tmp.
+func TestWrite_RenameFails_DestIsNonEmptyDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows MoveFileEx behaviour for replacing a directory with a
+		// file is layered on the "replace existing" semantics the unix
+		// rename(2) test relies on; skip rather than maintain divergent
+		// expected error strings.
+		t.Skip("rename-into-directory semantics differ on Windows")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.dat")
+
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "occupant"), []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := atomicwrite.Write(path, []byte("data"), 0o600, false); err == nil {
+		t.Fatal("expected Write to fail when destination is a non-empty directory")
+	}
+
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("tmp leaked after rename failure: stat err = %v", err)
+	}
+}
+
 func TestWrite_HonorsMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("file mode bits are not enforced the same way on Windows")
