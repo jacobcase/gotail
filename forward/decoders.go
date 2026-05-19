@@ -8,9 +8,19 @@ import "encoding/json"
 type Decoder[T any] func(line []byte) (T, error)
 
 // IdentityDecoder returns the line as-is without copying. The returned slice
-// aliases the LineReader's internal buffer and is only valid until the next
-// call to Source.Records. Use [IdentityDecoderCopy] if you need to retain
-// values across iterations.
+// aliases the LineReader's internal buffer.
+//
+// UNSAFE INSIDE THE FORWARDER PIPELINE. The Forwarder accumulates decoded
+// values into a batch across multiple Source.Next calls before flushing to
+// the Sink, so earlier batch entries point at buffer bytes that subsequent
+// reads have already overwritten. The Sink will see scrambled or duplicated
+// content. Inside the Forwarder, always use [IdentityDecoderCopy].
+//
+// This function exists for callers driving a [Decoder] outside the Forwarder
+// (e.g. a custom pipeline that consumes one record at a time and never
+// retains the slice across the next Source.Next). It is also used by the
+// in-tree benchmarks, which deliberately pair it with a discarding sink to
+// measure the zero-copy hot path.
 func IdentityDecoder(line []byte) ([]byte, error) {
 	return line, nil
 }

@@ -417,7 +417,7 @@ github.com/jacobcase/gotail/
 ├── tailtest/     Test helpers for L2: mutable MemorySource (Add/Prune)
 ├── forwardtest/  Test helpers for L3: RecordingSink[T], FailingSink[T]
 ├── cmd/gotail/   `tail -f` reference CLI (~70 LOC)
-└── internal/     atomicwrite, bufpool — not part of the public API
+└── internal/     atomicwrite — not part of the public API
 ```
 
 | Package | Layer | Used when |

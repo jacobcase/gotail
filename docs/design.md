@@ -153,8 +153,7 @@ github.com/jacobcase/gotail/
 ├── forwardtest/            Test helpers for L3: RecordingSink[T], FailingSink[T]
 │
 └── internal/
-    ├── atomicwrite/        tmp+fsync+rename helper
-    └── bufpool/            sync.Pool for line buffers
+    └── atomicwrite/        tmp+fsync+rename helper
 ```
 
 External dependencies: **none** beyond stdlib if the fsnotify backend is build-tagged off by default. With it on: `github.com/fsnotify/fsnotify` only.
@@ -751,8 +750,8 @@ WithSyncBackgroundInterval(d)     // requires WithSyncMode(SyncBackground); erro
 
 | Layer | Hook | Signature | When |
 |---|---|---|---|
-| L2 | `OnDropped` | `func(droppedFiles int)` | Cursor's file is missing on resume; `droppedFiles` = how many backups have aged off |
-| L2 | `OnRotated` | `func(from, to Position)` | Watcher detected rotation and switched files |
+| L2 | `OnDropped` | `func(droppedFiles int)` | Cursor's file is missing on resume; `droppedFiles` is always 1 (signals "a drop occurred"; precise historical count is not tracked) |
+| L2 | `OnRotated` | `func(from, to Position)` | Fires on rotation. Two firing sites: (a) LineReader-detected in-place rotation (new inode at watched path), (b) Tailer.advance stepping to the next file in the Source enumeration |
 | L2 | `OnTruncated` | `func(at Position)` | File size dropped below current position |
 | L2 | `OnCheckpoint` | `func(c Checkpoint)` | Cursor.Save returned successfully |
 | L2 | `OnError` | `func(err error)` | Non-fatal error during tail |
