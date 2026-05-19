@@ -84,9 +84,9 @@ type Options struct {
 	// path still exists but has a different inode than the cursor recorded.
 	// Default (false) is fail-safe: [New] returns an error wrapping
 	// [ErrInodeMismatch], which prevents silent ingest of substituted content
-	// in shared-FS / multi-tenant deployments. Set to true to restore the
-	// pre-fix v2 behaviour: log a warning, fire [OnInodeMismatch] (if set),
-	// and fall through to [OnMissingCheckpoint] policy.
+	// in shared-FS / multi-tenant deployments. Set to true to fire
+	// [OnInodeMismatch] (if set) and fall through to [OnMissingCheckpoint]
+	// policy.
 	AllowInodeMismatch bool
 	// RequireCursor causes [New] to return an error when Cursor is nil.
 	// Use this to prevent accidental deployment without checkpointing
@@ -96,6 +96,12 @@ type Options struct {
 	// Hooks — all optional and nil-safe. Hooks are invoked synchronously
 	// from the read loop and must not block; offload slow work to a
 	// goroutine or buffered channel if needed.
+
+	// OnDropped fires when the cursor names a file that is no longer present
+	// and [OnMissingCheckpoint] resolves to [FallbackOldest]. The argument
+	// signals that a drop occurred; the precise count of aged-off backups is
+	// not tracked by the library (it requires historical Source state) and
+	// is reported as 1.
 	OnDropped func(droppedFiles int)
 	OnRotated func(from, to Position)
 	OnError   func(err error)
@@ -177,12 +183,25 @@ type Tailer struct {
 // the supplied ctx. The ctx governs only startup I/O; the Tailer's runtime
 // loop uses the per-call ctx passed to [Tailer.Next] and the internal close
 // signal from [Tailer.Close].
-func New(ctx context.Context, opts Options) (*Tailer, error) {
+func New(ctx context.Context, opts Options) (_ *Tailer, returnErr error) {
 	if opts.Source == nil {
 		return nil, errors.New("tail: Options.Source must not be nil")
 	}
 	if opts.RequireCursor && opts.Cursor == nil {
 		return nil, errors.New("tail: RequireCursor is set but Cursor is nil")
+	}
+	// Once New is entered with a non-nil Cursor, it owns the cursor's
+	// lifecycle for the duration of this call. On any failure return, close
+	// the cursor so callers don't leak the flock (acquired inside
+	// NewFileCursor) when New fails after the cursor was already constructed.
+	// The canonical caller pattern is `defer t.Close()` only on success; this
+	// defer plugs the failure path.
+	if opts.Cursor != nil {
+		defer func() {
+			if returnErr != nil {
+				_ = opts.Cursor.Close()
+			}
+		}()
 	}
 	if opts.SkipExisting && opts.Whence != 0 {
 		return nil, errors.New("tail: SkipExisting and Whence are mutually exclusive")
@@ -318,7 +337,15 @@ func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) 
 	if err != nil {
 		return fmt.Errorf("tail: open %s: %w", path, err)
 	}
-	t.lr = watch.NewLineReader(w, watch.LineOptions{OnTruncated: t.opts.OnTruncated})
+	t.lr = watch.NewLineReader(w, watch.LineOptions{
+		OnTruncated: t.opts.OnTruncated,
+		OnRotated: func(from, to Position) {
+			t.stats.rotations.Add(1)
+			if t.opts.OnRotated != nil {
+				t.opts.OnRotated(from, to)
+			}
+		},
+	})
 	return nil
 }
 
@@ -369,7 +396,6 @@ func findFileByInode(files []string, want uint64, wantPath string, noInodeCheck 
 // advance closes the current LineReader and opens the next file in the series.
 func (t *Tailer) advance(ctx context.Context) error {
 	prev := t.cur
-	_ = t.lr.Close()
 
 	nextIdx := t.fileIdx + 1
 	if nextIdx >= len(t.files) {
@@ -378,11 +404,18 @@ func (t *Tailer) advance(ctx context.Context) error {
 		// not reached under normal flow. A custom Source with finite
 		// enumeration could still reach it. Only close done in StopAtEOF
 		// mode; live-tail callers don't expect Done() to fire spontaneously.
+		// Leave t.lr alone: closing it before knowing whether we can advance
+		// would leave Next operating on a closed reader if the caller invokes
+		// it again. Tailer.Close handles the eventual cleanup.
 		if t.opts.StopAtEOF {
 			t.doneOnce.Do(func() { close(t.done) })
 		}
 		return ErrSourceExhausted
 	}
+
+	// Close the previous reader only now that we know we are about to open a
+	// new one. The order matters: see the defensive branch above.
+	_ = t.lr.Close()
 
 	nextPath := t.files[nextIdx]
 	t.fileIdx = nextIdx

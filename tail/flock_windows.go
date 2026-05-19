@@ -3,7 +3,9 @@
 package tail
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strconv"
 	"syscall"
@@ -43,6 +45,17 @@ func sentinelOverlapped() syscall.Overlapped {
 type flock struct{ f *os.File }
 
 func acquireFlock(path string) (*flock, error) {
+	// Refuse reparse points (symlinks, junctions, mount points) so an
+	// attacker can't redirect the lock through a planted reparse point.
+	// Mirrors the §5.4 step 1 contract for the Unix path's O_NOFOLLOW.
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 || fi.Mode()&os.ModeIrregular != 0 {
+			return nil, fmt.Errorf("tail: lock path %s is a reparse point or non-regular file; refusing to follow", path)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("tail: lstat lock file %s: %w", path, err)
+	}
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("tail: open lock file %s: %w", path, err)
