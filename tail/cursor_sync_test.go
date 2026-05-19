@@ -131,6 +131,122 @@ func TestFileCursor_SyncBackground_FlushesPeriodically(t *testing.T) {
 	t.Fatal("background flusher did not write checkpoint within 5×interval")
 }
 
+// TestTailer_CloseWithFlush_SyncOnCommit verifies that CloseWithFlush forces
+// the buffered checkpoint to disk under SyncOnCommit, matching its documented
+// "commit the current position before tearing down" contract. Without the
+// explicit Sync call inside CloseWithFlush the buffered position would be
+// silently discarded by Cursor.Close.
+func TestTailer_CloseWithFlush_SyncOnCommit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.log")
+	cursorPath := filepath.Join(dir, "events.cursor")
+	if err := os.WriteFile(logPath, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cur, err := tail.NewFileCursor(cursorPath, tail.WithSyncMode(tail.SyncOnCommit))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := tail.New(ctx, tail.Options{
+		Source:    tail.SingleFile(logPath),
+		Cursor:    cur,
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Consume both lines so t.cur is non-zero.
+	rec, err := tr.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next #1: %v", err)
+	}
+	want := rec.Pos
+	if _, err := tr.Next(ctx); err != nil {
+		t.Fatalf("Next #2: %v", err)
+	}
+
+	if err := tr.CloseWithFlush(ctx); err != nil {
+		t.Fatalf("CloseWithFlush: %v", err)
+	}
+
+	// Cursor file must exist on disk after CloseWithFlush.
+	if _, err := os.Stat(cursorPath); err != nil {
+		t.Fatalf("cursor file not written after CloseWithFlush: %v", err)
+	}
+
+	// Re-open and verify the persisted offset is past the first line.
+	verify, err := tail.NewFileCursor(cursorPath, tail.WithSyncMode(tail.SyncOnCommit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verify.Close()
+	cp, found, err := verify.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("CloseWithFlush did not persist checkpoint under SyncOnCommit")
+	}
+	if cp.Pos.Offset <= want.Offset {
+		t.Fatalf("persisted offset %d should be past first line offset %d", cp.Pos.Offset, want.Offset)
+	}
+}
+
+// TestTailer_CloseWithFlush_SyncBackground mirrors the SyncOnCommit case
+// for SyncBackground mode: CloseWithFlush must flush the in-memory pending
+// write before the background flusher's next tick.
+func TestTailer_CloseWithFlush_SyncBackground(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.log")
+	cursorPath := filepath.Join(dir, "events.cursor")
+	if err := os.WriteFile(logPath, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a long flush interval so the background flusher will not fire
+	// between Save and CloseWithFlush — only the in-flush call should land
+	// the checkpoint on disk.
+	cur, err := tail.NewFileCursor(cursorPath,
+		tail.WithSyncMode(tail.SyncBackground),
+		tail.WithSyncBackgroundInterval(10*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := tail.New(ctx, tail.Options{
+		Source:    tail.SingleFile(logPath),
+		Cursor:    cur,
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := tr.Next(ctx); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	if err := tr.CloseWithFlush(ctx); err != nil {
+		t.Fatalf("CloseWithFlush: %v", err)
+	}
+
+	if _, err := os.Stat(cursorPath); err != nil {
+		t.Fatalf("cursor file not written after CloseWithFlush: %v", err)
+	}
+}
+
 // TestFileCursor_SyncBackground_ClosePropagatesGoroutineExit verifies that
 // Close terminates the background goroutine. goleak detects any leak.
 func TestFileCursor_SyncBackground_ClosePropagatesGoroutineExit(t *testing.T) {

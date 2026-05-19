@@ -580,6 +580,16 @@ func (t *Tailer) CloseWithFlush(ctx context.Context) error {
 			if pos != (Position{}) {
 				cp := Checkpoint{Pos: pos, Meta: meta}
 				saveErr = t.opts.Cursor.Save(ctx, cp)
+				// In SyncOnCommit / SyncBackground modes, Save buffers and
+				// returns without writing to disk. CloseWithFlush promises
+				// durability before teardown, so drive Sync explicitly when
+				// the cursor implements Syncer. SyncAlways is a no-op here
+				// because Save already flushed.
+				if saveErr == nil {
+					if s, ok := t.opts.Cursor.(Syncer); ok {
+						saveErr = s.Sync(ctx)
+					}
+				}
 				if saveErr == nil && t.opts.OnCheckpoint != nil {
 					t.opts.OnCheckpoint(cp)
 				}
