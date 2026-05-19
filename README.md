@@ -457,9 +457,7 @@ a build artifact and to [Codecov](https://codecov.io/gh/jacobcase/gotail).
 
 ### Design plan
 
-The detailed design lives in [`docs/v2-plan.md`](docs/v2-plan.md). When
-the shipped code drifts from the plan, the divergence is recorded in
-the plan's `## 11. Deviations` section.
+The detailed design lives in [`docs/design.md`](docs/design.md).
 
 
 ## Docs
@@ -469,4 +467,4 @@ the plan's `## 11. Deviations` section.
 - [Cookbook: Standalone watch usage](docs/cookbook/standalone.md)
 - [Metrics: Prometheus](docs/metrics-prometheus.md)
 - [Metrics: OpenTelemetry](docs/metrics-otel.md)
-- [v2 design plan](docs/v2-plan.md)
+- [Design plan](docs/design.md)
