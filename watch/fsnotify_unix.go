@@ -88,8 +88,8 @@ func (w *fsnotifyWatcher) Wait(ctx context.Context) (Event, error) {
 			if ok {
 				return ev, nil
 			}
-			if !w.fsnWait(ctx) {
-				return Event{}, ctx.Err()
+			if err := w.fsnWait(ctx); err != nil {
+				return Event{}, err
 			}
 			continue
 		}
@@ -99,8 +99,8 @@ func (w *fsnotifyWatcher) Wait(ctx context.Context) (Event, error) {
 			if w.c.StopAtEOF {
 				return Event{}, io.EOF
 			}
-			if !w.fsnWait(ctx) {
-				return Event{}, ctx.Err()
+			if err := w.fsnWait(ctx); err != nil {
+				return Event{}, err
 			}
 			continue
 		}
@@ -112,8 +112,8 @@ func (w *fsnotifyWatcher) Wait(ctx context.Context) (Event, error) {
 			oldInode := w.inode
 			w.pos = 0
 			w.inode = inode
-			w.logger.Debug("watch: rotated",
-				"path", w.c.Path, "old_inode", oldInode, "new_inode", inode)
+			w.logger.Debug(fmt.Sprintf("watch: rotated (prev inode %d)", oldInode),
+				"path", w.c.Path, "inode", inode, "offset", int64(0))
 			return Event{
 				Path:     w.c.Path,
 				Pos:      Position{File: w.c.Path, Inode: inode, Offset: 0},
@@ -122,8 +122,8 @@ func (w *fsnotifyWatcher) Wait(ctx context.Context) (Event, error) {
 		}
 
 		if size < w.pos {
-			w.logger.Debug("watch: truncation",
-				"path", w.c.Path, "inode", w.inode, "was", w.pos, "now", size)
+			w.logger.Debug(fmt.Sprintf("watch: truncation (size %d -> %d)", w.pos, size),
+				"path", w.c.Path, "inode", w.inode, "offset", int64(0))
 			w.pos = 0
 			return Event{
 				Path:      w.c.Path,
@@ -144,8 +144,8 @@ func (w *fsnotifyWatcher) Wait(ctx context.Context) (Event, error) {
 		if w.c.StopAtEOF {
 			return Event{}, io.EOF
 		}
-		if !w.fsnWait(ctx) {
-			return Event{}, ctx.Err()
+		if err := w.fsnWait(ctx); err != nil {
+			return Event{}, err
 		}
 	}
 }
@@ -176,8 +176,8 @@ func (w *fsnotifyWatcher) openFirst() (Event, bool, error) {
 					"watch: resume point inode mismatch on %s: want=%d got=%d: %w",
 					w.c.Path, r.Inode, inode, ErrInodeMismatch)
 			}
-			w.logger.Warn("watch: resume point inode mismatch — restarting at offset 0",
-				"path", w.c.Path, "want_inode", r.Inode, "got_inode", inode)
+			w.logger.Warn(fmt.Sprintf("watch: resume point inode mismatch (want %d) — restarting at offset 0", r.Inode),
+				"path", w.c.Path, "inode", inode, "offset", int64(0))
 		}
 	} else if w.whence == io.SeekEnd {
 		offset = size
@@ -199,22 +199,24 @@ func (w *fsnotifyWatcher) openFirst() (Event, bool, error) {
 }
 
 // fsnWait blocks until a relevant fsnotify event arrives for the watched path,
-// the watcher's event channel closes, or ctx is done.
-func (w *fsnotifyWatcher) fsnWait(ctx context.Context) bool {
+// the watcher's event channel closes, or ctx is done. Returns nil when an
+// event arrived, ctx.Err() when ctx is done, or ErrWatcherClosed when the
+// watcher was closed concurrently (Events or Errors channel closed).
+func (w *fsnotifyWatcher) fsnWait(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return false
+			return ctx.Err()
 		case ev, ok := <-w.fw.Events:
 			if !ok {
-				return false
+				return ErrWatcherClosed
 			}
 			if filepath.Clean(ev.Name) == w.target {
-				return true
+				return nil
 			}
 		case err, ok := <-w.fw.Errors:
 			if !ok {
-				return false
+				return ErrWatcherClosed
 			}
 			w.logger.Warn("watch: fsnotify error", "err", err, "path", w.c.Path)
 		}

@@ -32,7 +32,7 @@ type pollWatcher struct {
 	whence int
 
 	started bool   // true once the first event has been emitted
-	pos     int64  // last-emitted size watermark
+	pos     int64  // last-emitted size
 	inode   uint64 // inode the LineReader currently has open
 }
 
@@ -105,8 +105,8 @@ func (p *pollWatcher) Wait(ctx context.Context) (Event, error) {
 			oldInode := p.inode
 			p.pos = 0
 			p.inode = inode
-			p.logger.Debug("watch: rotated",
-				"path", p.c.Path, "old_inode", oldInode, "new_inode", inode)
+			p.logger.Debug(fmt.Sprintf("watch: rotated (prev inode %d)", oldInode),
+				"path", p.c.Path, "inode", inode, "offset", int64(0))
 			return Event{
 				Path:     p.c.Path,
 				Pos:      Position{File: p.c.Path, Inode: inode, Offset: 0},
@@ -114,10 +114,10 @@ func (p *pollWatcher) Wait(ctx context.Context) (Event, error) {
 			}, nil
 		}
 
-		// ── Phase 4: truncation (size dropped below watermark) ─────────────
+		// ── Phase 4: truncation (size dropped below last-emitted size) ────
 		if size < p.pos {
-			p.logger.Debug("watch: truncation",
-				"path", p.c.Path, "inode", p.inode, "was", p.pos, "now", size)
+			p.logger.Debug(fmt.Sprintf("watch: truncation (size %d -> %d)", p.pos, size),
+				"path", p.c.Path, "inode", p.inode, "offset", int64(0))
 			p.pos = 0
 			return Event{
 				Path:      p.c.Path,
@@ -179,8 +179,8 @@ func (p *pollWatcher) openFirst() (Event, bool, error) {
 			}
 			// Allowed: continue from offset 0 of the new file, but log so
 			// the dropped resume is not silent.
-			p.logger.Warn("watch: resume point inode mismatch — restarting at offset 0",
-				"path", p.c.Path, "want_inode", r.Inode, "got_inode", inode)
+			p.logger.Warn(fmt.Sprintf("watch: resume point inode mismatch (want %d) — restarting at offset 0", r.Inode),
+				"path", p.c.Path, "inode", inode, "offset", int64(0))
 		}
 	} else if p.whence == io.SeekEnd {
 		offset = size
