@@ -956,7 +956,7 @@ These are best-in-class additions a v2 should ship:
 
 3. **Position invariant tests.** Property-based test: for any sequence of `(write, rotate, write, ...)` events, every byte written by the writer is yielded exactly once across all `Records` calls. Fuzz the timing of poll ticks. Catches whole classes of regressions in the rotation logic.
 
-4. **Graceful shutdown semantics.** `Tailer.Close()` should drain the current line, save the cursor one last time, and return. Provide `Tailer.CloseWithFlush(ctx)` for callers that want to ensure the cursor is durable before exit. (Default `Close()` flushes synchronously — there's no separate flush in `SyncAlways` mode.)
+4. **Graceful shutdown semantics.** `Tailer.Close()` discards any pending uncommitted line and does not advance the cursor (Decision #19); it is terminal and idempotent. Callers that want the most-recently-yielded position persisted before exit use `Tailer.CloseWithFlush(ctx)`, which saves the cursor — and drives `Sync` under `SyncOnCommit`/`SyncBackground` — before the normal teardown.
 
 5. **`Tailer.Stats()` snapshot.** A pull-style alternative to push-style hooks, for callers that prefer scraping. Returns counts of bytes read, lines yielded, rotations seen, errors, current position. Atomic snapshot; cheap.
 
