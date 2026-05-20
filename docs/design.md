@@ -97,7 +97,7 @@ This shape covers log forwarders (Vector / Fluent Bit / Promtail-style), event-t
 | ext | Sentinel errors via `errors.Is/As` | `ErrCheckpointMissing`, `ErrInodeMismatch`, `ErrSourceExhausted`, `ErrLockHeld`, `ErrLineTooLong`, `ErrPermanent` | All |
 | ext | Three packages not three structs | `github.com/jacobcase/gotail/watch`, `.../tail`, `.../forward` | All |
 | ext | Hooks not concrete metrics | `OnBatchSent`, `OnSendError`, `OnCommitted`, `OnDecodeError`, `OnDropped`, `OnError`, `OnCheckpoint` callback fields. No prom/otel deps | L2/L3 |
-| ext | Memory-backed adapters for tests | `tail.NewMemoryCursor()`, `tail.StaticSource()`, `tailtest.MemorySource{}`, `watch.FakeWatcher()`, `forwardtest.RecordingSink[T]` / `FailingSink[T]` | All |
+| ext | Memory-backed adapters for tests | `tail.NewMemoryCursor()`, `tail.StaticSource()`, `tailtest.MemorySource{}`, `watchtest.FakeWatcher()`, `forwardtest.RecordingSink[T]` / `FailingSink[T]` | All |
 | ext | Iterator form | `Tailer.Records(ctx) iter.Seq2[Record, error]` | L2 |
 | ext | Pull-style escape hatch | `Tailer.Next(ctx) (Record, error)` | L2 |
 | ext | Inode opt-out for Windows/weird FS | `tail.Options.NoInodeCheck bool` | L2 |
@@ -228,10 +228,12 @@ func NewPolling(c Config) (Watcher, error)
 func NewFsnotify(c Config) (Watcher, error)  // ErrUnsupported on stub builds
 func New(c Config) (Watcher, error)          // fsnotify with poll fallback
 
-// FakeWatcher is a test helper. It emits a single ReOpened event for path at
-// pos, then EOF on subsequent Wait calls. Combine with a tmpfile populated by
-// the test for full LineReader unit-testability without a real polling loop.
-func FakeWatcher(path string, pos Position) Watcher
+// FakeWatcher is a test helper; it lives in the watchtest sub-package so the
+// production watch surface stays free of test-only symbols. It emits a single
+// ReOpened event for path at pos, then EOF on subsequent Wait calls. Combine
+// with a tmpfile populated by the test for full LineReader unit-testability
+// without a real polling loop.
+// (See watchtest.FakeWatcher.)
 
 // StatInode returns the platform-specific inode/file-id for path without
 // opening the file. Used by tail.findFileByInode to anchor a checkpointed
@@ -248,6 +250,11 @@ type LineOptions struct {
     BufferSize  int   // bufio buffer; 0 = 64 KiB
     MaxLine     int   // max line length before ErrLineTooLong; 0 = 1 MiB
     KeepNewline bool  // include trailing \n in returned bytes; default false
+
+    // L1 carries two observability hooks. They are intentionally on the L1
+    // surface so the LineReader can fire them at moments only it sees:
+    OnTruncated func(at Position)            // late-detection copytruncate (§5.6)
+    OnRotated   func(from, to Position)      // in-place rotation completion (§5.6)
 }
 
 func NewLineReader(w Watcher, opts LineOptions) *LineReader
@@ -1267,7 +1274,7 @@ All decisions below are locked in before implementation begins.
 | 11 | Should `Forwarder.Run` be re-entrant after returning? | No | One-shot. Document. Construct a new Forwarder if you want to restart. |
 | 12 | Compressed backup file support (.gz)? | Detection ships in v2.0; decompression deferred to v2.1. `Lumberjack` and `Logrotate` recognise `.gz` variants and skip them, surfacing the skipped path via `WithLumberjackSkippedHook` / `WithLogrotateSkippedHook` for observability. A checkpoint pointing at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy. | Skip-and-observe is cheap and prevents silent data omission; full decompression adds the bytes-vs-offset semantic axis and waits for v2.1. |
 | 13 | Hybrid fsnotify+poll mode? | Defer to v2.1 | Single-mode is correct; hybrid is a latency optimization. Design API to allow later addition. |
-| 14 | Should we ship a CLI binary (`cmd/gotail`)? | Yes, small one | Replaces some `tail -F` use cases; serves as integration test. ~50 LOC. |
+| 14 | Should we ship a CLI binary (`cmd/gotail`)? | Yes, small one — `tail -F` shape only, L1/L2 path. End-to-end L3 coverage lives in the `forward` package tests (incl. `httptest.Server`-backed integration tests), not in the CLI. ~50–80 LOC. |
 | 15 | Default `MissingPolicy` for `OnMissingCheckpoint`? | `FallbackOldest` | Matches driving requirement #4 (lose nothing, accept duplicates). Most graceful default for at-least-once shippers. |
 | 16 | License of v2? | Same as v1 (file `LICENSE`) | No reason to change. |
 | 17 | Should the Watcher port expose an `io.Reader`? | No. The Watcher/LineReader split (§4 L1) means LineReader owns the only `*os.File`; the Watcher emits state-transition events only. After a `ReOpened` event the LineReader keeps reading the previous fd to `io.EOF` before opening the new path, preserving the rotation-race trailing-bytes drain without crossing an `io.Reader` through the port. | Single-fd, single-owner is simpler and removes the duplicate-fd race window. |
@@ -1363,7 +1370,7 @@ Suggested ordering. Each phase is independently mergeable and reviewable. Estima
 - README rewrite with v1-vs-v2 migration table.
 - `docs/metrics-prometheus.md`, `docs/metrics-otel.md`.
 - `docs/cookbook/` with the worked examples (HTTPS forwarder, archived-file backfill, standalone tailer).
-- `cmd/gotail` CLI binary (~50 LOC) — `gotail -f /var/log/foo.log`, integration smoke test.
+- `cmd/gotail` CLI binary (~50–80 LOC) — `gotail [-start] [-stop] <path>` covering the L1/L2 `tail -F` use case. End-to-end L3 (Forwarder + Sink) coverage lives in the `forward` package's tests against an `httptest.Server`, not in the CLI binary.
 - Benchmarks committed (Section 6) + benchstat baseline.
 - godoc review pass: every exported type has a doc comment; every package has a `doc.go` overview.
 
