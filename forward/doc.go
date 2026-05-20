@@ -27,7 +27,10 @@
 //
 // # slog keys
 //
-// Library log lines use the following attribute keys: err, offset, attempt, latency_ms.
+// Library log lines use a subset of the gotail-wide canonical keys
+// ([github.com/jacobcase/gotail/v2/watch] documents the full set):
+// err, offset, attempt, latency_ms. Future events that need path or inode
+// will use those canonical names too.
 //
 // # Layering
 //
