@@ -16,7 +16,7 @@ var (
 	ErrCheckpointMissing = errors.New("tail: checkpointed file no longer present")
 
 	// ErrLockHeld is returned by NewFileCursor when the sibling lock file is
-	// already held by another process. Requires Phase 3 WithFlock option.
+	// already held by another process. Requires the WithFlock option.
 	ErrLockHeld = errors.New("tail: cursor lock held by another process")
 
 	// ErrInodeMismatch is returned by [New] when a checkpoint's inode no
