@@ -22,8 +22,9 @@ import (
 // emitted — i.e. what we have told the consumer is available, not the
 // consumer's actual read position.
 type pollWatcher struct {
-	c      Config
-	logger *slog.Logger
+	c        Config
+	logger   *slog.Logger
+	shutdown <-chan struct{} // closed by the owner to interrupt a blocking Wait
 
 	// resume and whence hold the one-shot initial-open state copied from
 	// Config at construction. They are zeroed after the first event has
@@ -32,7 +33,7 @@ type pollWatcher struct {
 	whence int
 
 	started bool   // true once the first event has been emitted
-	pos     int64  // last-emitted size watermark
+	pos     int64  // last-emitted size
 	inode   uint64 // inode the LineReader currently has open
 }
 
@@ -55,14 +56,14 @@ func NewPolling(c Config) (Watcher, error) {
 	if lg == nil {
 		lg = slog.Default()
 	}
-	return &pollWatcher{c: c, logger: lg, resume: c.Resume, whence: c.Whence}, nil
+	return &pollWatcher{c: c, logger: lg, shutdown: c.Shutdown, resume: c.Resume, whence: c.Whence}, nil
 }
 
 // Wait blocks until there is a state change on the watched file, then returns
 // a description of that change. It is not safe for concurrent use.
 func (p *pollWatcher) Wait(ctx context.Context) (Event, error) {
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := p.stopErr(ctx); err != nil {
 			return Event{}, err
 		}
 
@@ -76,8 +77,8 @@ func (p *pollWatcher) Wait(ctx context.Context) (Event, error) {
 				return ev, nil
 			}
 			// File not present yet; sleep and retry.
-			if !p.sleep(ctx) {
-				return Event{}, ctx.Err()
+			if err := p.sleep(ctx); err != nil {
+				return Event{}, err
 			}
 			continue
 		}
@@ -89,8 +90,8 @@ func (p *pollWatcher) Wait(ctx context.Context) (Event, error) {
 			if p.c.StopAtEOF {
 				return Event{}, io.EOF
 			}
-			if !p.sleep(ctx) {
-				return Event{}, ctx.Err()
+			if err := p.sleep(ctx); err != nil {
+				return Event{}, err
 			}
 			continue
 		}
@@ -105,8 +106,8 @@ func (p *pollWatcher) Wait(ctx context.Context) (Event, error) {
 			oldInode := p.inode
 			p.pos = 0
 			p.inode = inode
-			p.logger.Debug("watch: rotated",
-				"path", p.c.Path, "old_inode", oldInode, "new_inode", inode)
+			p.logger.Debug(fmt.Sprintf("watch: rotated (prev inode %d)", oldInode),
+				"path", p.c.Path, "inode", inode, "offset", int64(0))
 			return Event{
 				Path:     p.c.Path,
 				Pos:      Position{File: p.c.Path, Inode: inode, Offset: 0},
@@ -114,10 +115,10 @@ func (p *pollWatcher) Wait(ctx context.Context) (Event, error) {
 			}, nil
 		}
 
-		// ── Phase 4: truncation (size dropped below watermark) ─────────────
+		// ── Phase 4: truncation (size dropped below last-emitted size) ────
 		if size < p.pos {
-			p.logger.Debug("watch: truncation",
-				"path", p.c.Path, "inode", p.inode, "was", p.pos, "now", size)
+			p.logger.Debug(fmt.Sprintf("watch: truncation (size %d -> %d)", p.pos, size),
+				"path", p.c.Path, "inode", p.inode, "offset", int64(0))
 			p.pos = 0
 			return Event{
 				Path:      p.c.Path,
@@ -140,8 +141,8 @@ func (p *pollWatcher) Wait(ctx context.Context) (Event, error) {
 		if p.c.StopAtEOF {
 			return Event{}, io.EOF
 		}
-		if !p.sleep(ctx) {
-			return Event{}, ctx.Err()
+		if err := p.sleep(ctx); err != nil {
+			return Event{}, err
 		}
 	}
 }
@@ -179,8 +180,8 @@ func (p *pollWatcher) openFirst() (Event, bool, error) {
 			}
 			// Allowed: continue from offset 0 of the new file, but log so
 			// the dropped resume is not silent.
-			p.logger.Warn("watch: resume point inode mismatch — restarting at offset 0",
-				"path", p.c.Path, "want_inode", r.Inode, "got_inode", inode)
+			p.logger.Warn(fmt.Sprintf("watch: resume point inode mismatch (want %d) — restarting at offset 0", r.Inode),
+				"path", p.c.Path, "inode", inode, "offset", int64(0))
 		}
 	} else if p.whence == io.SeekEnd {
 		offset = size
@@ -201,14 +202,33 @@ func (p *pollWatcher) openFirst() (Event, bool, error) {
 	}, true, nil
 }
 
-func (p *pollWatcher) sleep(ctx context.Context) bool {
+// sleep waits one poll interval. It returns nil when the timer fires, ctx.Err()
+// when ctx is cancelled, or ErrWatcherClosed when the owner closes Shutdown.
+func (p *pollWatcher) sleep(ctx context.Context) error {
 	t := time.NewTimer(p.c.Interval)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
-		return false
+		return ctx.Err()
+	case <-p.shutdown:
+		return ErrWatcherClosed
 	case <-t.C:
-		return true
+		return nil
+	}
+}
+
+// stopErr reports a non-nil error if ctx is cancelled or the owner has closed
+// Shutdown, letting Wait bail out between the (non-blocking) stat phases rather
+// than only at the next sleep.
+func (p *pollWatcher) stopErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-p.shutdown:
+		return ErrWatcherClosed
+	default:
+		return nil
 	}
 }
 

@@ -1,6 +1,6 @@
 # gotail v2
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/jacobcase/gotail/v2.svg)](https://pkg.go.dev/github.com/jacobcase/gotail/v2)
+[![Go Reference](https://pkg.go.dev/badge/github.com/jacobcase/gotail/v3.svg)](https://pkg.go.dev/github.com/jacobcase/gotail/v3)
 [![CI](https://github.com/jacobcase/gotail/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jacobcase/gotail/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/jacobcase/gotail/branch/main/graph/badge.svg)](https://codecov.io/gh/jacobcase/gotail)
 
@@ -41,14 +41,14 @@ Use only the layer you need. Most callers use `tail` alone.
 Add the library to your module:
 
 ```
-go get github.com/jacobcase/gotail/v2
+go get github.com/jacobcase/gotail/v3
 ```
 
 Install the bundled `gotail` CLI (a `tail -f` replacement that uses the
 library):
 
 ```
-go install github.com/jacobcase/gotail/v2/cmd/gotail@latest
+go install github.com/jacobcase/gotail/v3/cmd/gotail@latest
 ```
 
 The library has no required external dependencies beyond the Go standard
@@ -71,7 +71,7 @@ import (
     "os/signal"
     "syscall"
 
-    "github.com/jacobcase/gotail/v2/tail"
+    "github.com/jacobcase/gotail/v3/tail"
 )
 
 func main() {
@@ -417,7 +417,7 @@ github.com/jacobcase/gotail/
 ├── tailtest/     Test helpers for L2: mutable MemorySource (Add/Prune)
 ├── forwardtest/  Test helpers for L3: RecordingSink[T], FailingSink[T]
 ├── cmd/gotail/   `tail -f` reference CLI (~70 LOC)
-└── internal/     atomicwrite, bufpool — not part of the public API
+└── internal/     atomicwrite — not part of the public API
 ```
 
 | Package | Layer | Used when |
@@ -457,9 +457,7 @@ a build artifact and to [Codecov](https://codecov.io/gh/jacobcase/gotail).
 
 ### Design plan
 
-The detailed design lives in [`docs/v2-plan.md`](docs/v2-plan.md). When
-the shipped code drifts from the plan, the divergence is recorded in
-the plan's `## 11. Deviations` section.
+The detailed design lives in [`docs/design.md`](docs/design.md).
 
 
 ## Docs
@@ -469,4 +467,4 @@ the plan's `## 11. Deviations` section.
 - [Cookbook: Standalone watch usage](docs/cookbook/standalone.md)
 - [Metrics: Prometheus](docs/metrics-prometheus.md)
 - [Metrics: OpenTelemetry](docs/metrics-otel.md)
-- [v2 design plan](docs/v2-plan.md)
+- [Design plan](docs/design.md)

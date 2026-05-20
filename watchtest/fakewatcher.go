@@ -1,11 +1,16 @@
 // Package watchtest provides test helpers for the watch package.
+//
+// Construction idiom: helpers with required parameters expose a New*
+// constructor (e.g. [FakeWatcher] takes a path and resume position).
+// Helpers with no required parameters are zero-value-usable. Mirrors
+// the convention in the sibling [tailtest] and [forwardtest] packages.
 package watchtest
 
 import (
 	"context"
 	"io"
 
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 type fakeWatcher struct {

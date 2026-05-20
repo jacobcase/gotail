@@ -1,87 +1,53 @@
-# gotail v2 — Design & Implementation Plan
+# gotail — Design
 
-**Status:** Design proposal, pre-implementation
-**Target Go version:** 1.26 or later (decided)
-**Audience:** the engineer implementing v2
+**Module:** `github.com/jacobcase/gotail/v3`
+**Target Go version:** 1.26 or later
+
+This document is a snapshot of the current design — it describes what the
+code does now, not how it got here. When a change alters a documented
+choice, the relevant section is edited in place.
 
 ---
 
-## 1. Executive Summary
+## 1. Overview
 
-v2 is a layered rewrite of gotail. The current code (`tail.go`, `line_reader.go`, `file_state.go`, `poll_watcher.go`) is correct and small but expresses a single low-level abstraction: "block until there's more bytes in this file, follow the file across rotation". Every consumer of the library has to hand-roll cursor persistence, rotation-spanning sources, batched delivery, single-instance protection, and metrics. The canonical consumer shape (see §3) — a process that writes structured events to a lumberjack-rotated file and ships batches to a remote ingest endpoint — needs all of the above and more.
+gotail is a layered file-tailing library. The canonical consumer shape (see §3) — a process that writes structured events to a lumberjack-rotated file and ships batches to a remote ingest endpoint — needs cursor persistence, rotation-spanning sources, batched delivery, single-instance protection, and metrics; gotail provides each as an opt-in layer so callers pay only for what they use.
 
-**Key changes vs v1:**
+**Design at a glance:**
 
 1. **Three packages, three abstraction layers** — `watch` (primitives), `tail` (durable line-oriented tail), `forward` (batched at-least-once shipper). Callers pay only for what they use.
-2. **Modern Go toolchain** — bump from Go 1.15 to current. Adopts `context.Context`, `log/slog`, `iter.Seq2`, `errors.Is/As`, generics where they earn their keep.
+2. **Modern Go** — `context.Context`, `log/slog`, `iter.Seq2`, `errors.Is/As`, and generics where they earn their keep.
 3. **Built-in checkpointing** — atomic, fsync'd, optional flock, pluggable `Cursor` interface, support for user-defined metadata persisted alongside the byte offset.
 4. **Multi-file Source abstraction** — handles single files, lumberjack-style rotation chains, and arbitrary glob-based sets, with rotation-outran-outage fallback.
-5. **Improved file-watch strategies** — keep polling as the always-works default, add a build-tagged fsnotify backend (with auto-fallback), document per-platform behavior.
-6. **Better rotation handling** — explicitly model rename+create, copytruncate, symlink swap, inode reuse, and mid-write truncation with documented behavior in each case.
+5. **File-watch strategies** — polling is the always-works default; a build-tagged fsnotify backend (with auto-fallback) is also provided, with documented per-platform behavior.
+6. **Rotation handling** — explicitly models rename+create, copytruncate, symlink swap, inode reuse, and mid-write truncation with documented behavior in each case.
 7. **Metrics hooks** — `OnX` callback fields, no concrete metrics dependency. Examples for Prometheus and OpenTelemetry shipped as docs only.
 8. **Generics on L3** — `Sink[T]`, `Decoder[T]`, `Forwarder[T]`. L1 and L2 stay byte-oriented because lines are bytes.
-9. **Memory-reuse hot paths** — `sync.Pool` for line buffers, explicit buffer-ownership rules at every API boundary, zero-alloc happy path.
+9. **Memory-reuse hot paths** — owned line buffers, explicit buffer-ownership rules at every API boundary, zero-alloc happy path.
 10. **Two-tier API** — L1 is the "give me bytes, I'll do the rest" primitive; L2/L3 are the "I have a job to get done" high-level shapes. Same library, different entry points.
-
-This is not a tear-down. The v1 polling watcher's race-aware rotation logic (re-checking the open file's size after detecting a new inode at the named path — `poll_watcher.go:131-143`) is load-bearing and survives unchanged in semantics, just relocated and modernized.
 
 ---
 
-## 2. Current State Analysis
+## 2. Load-bearing invariants
 
-### What v1 does well
+These correctness properties are guaranteed by the implementation. They are the subtle parts; any refactor must preserve them.
 
-- **Race-aware rotation in `pollWatcher.Wait` (`poll_watcher.go:117-149`).** When a new inode appears at the path, before closing the old file the watcher re-stats the open `*os.File` and yields any trailing bytes that were written between the size check and the rotation detection. This is the subtle correctness property and the v1 code gets it right. Any rewrite must preserve it. Test `TestReadAfterWatcher` (`tail_test.go:141-181`) pins this behavior.
-- **Inode-based identity (`file_state.go:60-67, 80-89`).** `FileState.Inode` plus `FileState.Position` is the right primitive for "where am I and which file is this". It's the same shape Linux's inotify has used for decades.
-- **Position tracked at byte resolution by `LineReader` (`line_reader.go:91-92`).** `Position += len(b)` after every `bufio.ReadBytes('\n')`, so the recorded position always points at the start of the next unread line. This is exactly what a checkpoint needs.
-- **Inode-guarded resume (`file_state.go:32-55`).** `SeekIfMatches` refuses to seek if the inode at the path no longer matches the saved state. Prevents reading the wrong file at the saved offset on rotated content.
-- **Small, intentional surface.** Five public types, one external dep (`golang.org/x/sys`). The bones are right.
-
-### What needs to change
-
-#### Public API shape
-
-- `WaitStatus.File *os.File` (`tail.go:57`). The watcher owns the file's lifecycle but exposes an `*os.File`, inviting consumers to `Seek` out from under it. The TODO on line 56 (`// TODO: provide io.Reader instead?`) is correct. Promote to `io.Reader`.
-- `Watcher.Wait() (s WaitStatus, closed bool, err error)` (`tail.go:72`). Three return values plus a side channel (`pollWatcher.cancel`, `poll_watcher.go:21`) where one `context.Context` parameter would do. Replace.
-- `Config.StartState *FileState` (`tail.go:38`). One-shot resume via mutable pointer that the watcher silently nils out after first use (`poll_watcher.go:165`). Subtle. Replace with a `Cursor` abstraction at L2 that owns its own state.
-- `ErrorHandler func(err error) error` (`tail.go:9`). Returning an error from a handler that may *change* the error is an anti-pattern; the v1 code stores the return as `l.err` (`line_reader.go:108, 128`) which means a handler can swallow the error by returning nil but cannot meaningfully transform it. Replace with hook callbacks (`OnError`) that don't mutate control flow, and a documented retry-vs-stop policy that's part of the type.
-- `LineReader.Next() bool` + `Bytes()` + `Err()` (`line_reader.go:71, 155, 162`). The `bufio.Scanner` shape. Modern Go prefers `Next(ctx) (line []byte, pos Position, err error)` — fewer footguns, no "did you forget to call Err()?" trap. Keep an iterator form (`iter.Seq2[Record, error]`) as the high-level shape.
-
-#### Missing capabilities (called out in `README.md` TODOs)
-
-- File checkpoints for resuming on restart.
-- Line-aligned checkpoints from LineReader (already accurate, just not persisted).
-- More thorough testing.
-- fsnotify implementation.
-
-#### Missing capabilities (not in TODOs but required for log-shipping use cases)
-
-- Source abstraction for "the set of files that make up this stream" — lumberjack rotation produces `events.log` plus chronologically-named backups; v1 only knows the active path.
-- Cursor persistence with atomic write + fsync + rename.
-- Single-instance flock.
-- Rotation-outran-outage fallback (when the cursor names a file no longer on disk).
-- Batched, retried delivery loop.
-- Custom metadata in checkpoint.
-
-#### Deeper issues
-
-- **`go.mod` line 3: `go 1.15`.** No generics, no `iter`, no `errors.Is/As`-style sentinels in the API, no `slog`. Modernization is a hard requirement.
-- **`unix.Stat_t` and `syscall.Stat_t` both checked in `file_state.go:60-67`.** On modern Go these are equivalent on the platforms that matter. The dual switch is dead code; drop the `golang.org/x/sys` dependency and use `syscall` directly. Net dep count: zero.
-- **No `context.Context` plumbing.** `pollWatcher.cancel chan struct{}` (`poll_watcher.go:21, 49, 73`) is the 2015 pattern. Replace with ctx propagation throughout.
-- **`pollWatcher.Wait` holds `mu` across the whole loop** (`poll_watcher.go:57-149`). It releases briefly during the timer wait but otherwise serializes everything. The Watcher is documented as not parallel-safe, which is fine, but the lock is doing nothing useful — there's no concurrent caller. Drop it; document non-thread-safe.
-- **No buffer reuse.** `bufio.NewReader(s.File)` (`line_reader.go:134`) allocates a fresh 4 KB buffer every time the file is reopened (rotation). `ReadBytes('\n')` allocates a new slice for every line (`line_reader.go:91`). For a high-velocity log this is the dominant allocation cost. Both fixable.
+- **Race-aware rotation drain.** When a new inode appears at the watched path, the previous file descriptor is read to `io.EOF` before switching to the new file, so trailing bytes written between the last size check and rotation detection are still yielded. The Watcher emits state transitions only; the `LineReader` owns the fd and performs the drain (Decision #17). Pinned by the rotation-race tests (Invariant 3 in §7).
+- **Inode-equality identity.** A position is `{file, inode, offset}`. Inode plus offset answers "where am I and which file is this"; a resume refuses to seek when the inode at the path no longer matches the saved cursor, preventing reads of the wrong file at a stale offset.
+- **Byte-resolution position.** `Position.Offset` advances by the full consumed byte count after every yielded line, so it always points at the start of the next unread line — exactly what a checkpoint needs (and what makes the cursor line-aligned).
+- **Zero-alloc steady state.** The read/frame/yield hot path owns its buffer and reuses it across reads and rotations (`head = tail = 0` on drain), so steady-state `LineReader.Next` and `Tailer.Next` allocate nothing.
 
 ---
 
 ## 3. Driving Requirements
 
-The v2 API is anchored to a canonical consumer pattern that generalizes across most production users of a tail-and-ship library:
+gotail's API is anchored to a canonical consumer pattern that generalizes across most production users of a tail-and-ship library:
 
 > A long-running process writes structured events (typically NDJSON via `log/slog`) to a `lumberjack.v2`-rotated file. A forwarder goroutine — in the same process or a sidecar — tails that file and POSTs batches to a remote ingest endpoint over HTTPS/mTLS. The on-disk file IS the buffer; the file format on disk equals the byte stream on the wire. The consumer also wants a "standalone" mode where events are written but no forwarder runs, so a separate agent can backfill the files later.
 
-This shape covers log forwarders (Vector / Fluent Bit / Promtail-style), event-tap pipelines, audit-log shippers, observability collectors, and most ingest-side reliability tools. The concrete requirements below were derived from one such consumer; v1 satisfies none of (1, 3–7) without significant caller-side code.
+This shape covers log forwarders (Vector / Fluent Bit / Promtail-style), event-tap pipelines, audit-log shippers, observability collectors, and most ingest-side reliability tools. The concrete requirements below were derived from one such consumer.
 
-| # | Requirement | v2 Mechanism | Layer |
+| # | Requirement | Mechanism | Layer |
 |---|---|---|---|
 | 1 | Tail across rotation (active file + chronologically older lumberjack backups) | `tail.Source` interface; `tail.Lumberjack(activePath)` built-in | L2 |
 | 2a | Persisted `{file, byte_offset}` checkpoint resumed across restarts | `tail.Cursor` interface; `tail.NewFileCursor(path)` | L2 |
@@ -91,19 +57,19 @@ This shape covers log forwarders (Vector / Fluent Bit / Promtail-style), event-t
 | 4 | Rotation-outran-outage fallback (resume oldest still-present, dropped-files counter) | `tail.Options.OnMissingCheckpoint` policy: `FallbackOldest` (default), `Fail`, `SkipToActive`. `OnDropped(n int)` callback fires the counter | L2 |
 | 5a | Batched delivery (group by size or age), ship to a Sink | `forward.Forwarder[T]` with `MaxBatchRecords`, `MaxBatchBytes`, `MaxBatchAge` | L3 |
 | 5b | On success commit position; on failure exponential backoff, don't advance | `Forwarder.Run` calls `Sink.Send`; on nil error calls `Source.Commit`; on error retries with exponential backoff bounded by `MaxBackoff` | L3 |
-| 6 | Standalone-write mode (slog only, no forwarder, no cursor) | First-class shape: write via `slog.Handler` to a lumberjack file; do not construct a Tailer or Forwarder. v2 contributes the *shape* by making L1/L2/L3 independently importable so "skip the forwarder" is just "don't import `forward`" | L0 (consumer-side) |
+| 6 | Standalone-write mode (slog only, no forwarder, no cursor) | First-class shape: write via `slog.Handler` to a lumberjack file; do not construct a Tailer or Forwarder. gotail contributes the *shape* by making L1/L2/L3 independently importable so "skip the forwarder" is just "don't import `forward`" | L0 (consumer-side) |
 | 7 | Backfill an archived/standalone file end-to-end | `tail.SingleFile(path)` source + `Options.StopAtEOF: true` + L3 forwarder. `Tailer.Done() <-chan struct{}` signals stream exhaustion | L2+L3 |
 | ext | Modern Go (slog, ctx, generics, iter) | Go 1.26+, slog throughout, ctx on every blocking call, generics on L3, `iter.Seq2` for `Records()` | All |
 | ext | Sentinel errors via `errors.Is/As` | `ErrCheckpointMissing`, `ErrInodeMismatch`, `ErrSourceExhausted`, `ErrLockHeld`, `ErrLineTooLong`, `ErrPermanent` | All |
 | ext | Three packages not three structs | `github.com/jacobcase/gotail/watch`, `.../tail`, `.../forward` | All |
 | ext | Hooks not concrete metrics | `OnBatchSent`, `OnSendError`, `OnCommitted`, `OnDecodeError`, `OnDropped`, `OnError`, `OnCheckpoint` callback fields. No prom/otel deps | L2/L3 |
-| ext | Memory-backed adapters for tests | `tail.NewMemoryCursor()`, `tail.StaticSource()`, `tailtest.MemorySource{}`, `watch.FakeWatcher()`, `forwardtest.RecordingSink[T]` / `FailingSink[T]` | All |
+| ext | Memory-backed adapters for tests | `tail.NewMemoryCursor()`, `tail.StaticSource()`, `tailtest.MemorySource{}`, `watchtest.FakeWatcher()`, `forwardtest.RecordingSink[T]` / `FailingSink[T]` | All |
 | ext | Iterator form | `Tailer.Records(ctx) iter.Seq2[Record, error]` | L2 |
 | ext | Pull-style escape hatch | `Tailer.Next(ctx) (Record, error)` | L2 |
 | ext | Inode opt-out for Windows/weird FS | `tail.Options.NoInodeCheck bool` | L2 |
 | ext | Cursor format human-inspectable | JSON | L2 |
 
-Additional v2 wishlist items map cleanly:
+Additional wishlist items map cleanly:
 
 | Request | Mechanism |
 |---|---|
@@ -120,12 +86,12 @@ Additional v2 wishlist items map cleanly:
 
 ---
 
-## 4. Proposed Architecture
+## 4. Architecture
 
 ### Package layout
 
 ```
-github.com/jacobcase/gotail/
+github.com/jacobcase/gotail/v3/
 ├── watch/                  L1 — file-as-stream primitives
 │   ├── watch.go            Watcher, Event, Position, Config, StatInode
 │   ├── poll.go             Polling implementation (always available)
@@ -153,8 +119,7 @@ github.com/jacobcase/gotail/
 ├── forwardtest/            Test helpers for L3: RecordingSink[T], FailingSink[T]
 │
 └── internal/
-    ├── atomicwrite/        tmp+fsync+rename helper
-    └── bufpool/            sync.Pool for line buffers
+    └── atomicwrite/        tmp+fsync+rename helper
 ```
 
 External dependencies: **none** beyond stdlib if the fsnotify backend is build-tagged off by default. With it on: `github.com/fsnotify/fsnotify` only.
@@ -169,7 +134,7 @@ Three terms with disjoint meaning. Used consistently throughout the library and 
 | **Checkpoint** | A persistable record `{Pos, Meta}`. What the storage port reads/writes. | `tail` |
 | **Cursor** | The storage port itself — interface for loading/saving Checkpoints. | `tail` |
 
-"Watermark" is *not* used. The previous L2 hook `OnCheckpoint` (fires after Cursor.Save) and the L3 hook `OnCheckpoint` (fires after a successful Sink.Send + Commit) were the same word for two events at different layers; v2 renames the L3 one to `OnCommitted` to keep the boundary clean.
+"Watermark" is *not* used. The L2 hook `OnCheckpoint` fires after `Cursor.Save`; the L3 hook `OnCommitted` fires after a successful `Sink.Send` + `Commit`. They are named distinctly — rather than `OnCheckpoint` at both layers — to keep the layer boundary clean.
 
 **"Source" is intentionally overloaded across two layers** — `tail.Source` (file-set enumeration interface) and `forward.RecordSource` (record-stream interface). They're orthogonal concepts that happen to share the noun. Each is unambiguous in its own package; the field name `forward.Options[T].Source` (typed `RecordSource`) reads naturally at call sites. Keep this note here so future readers don't try to "fix" the overlap by renaming one of them — both names are right in their own context.
 
@@ -229,10 +194,12 @@ func NewPolling(c Config) (Watcher, error)
 func NewFsnotify(c Config) (Watcher, error)  // ErrUnsupported on stub builds
 func New(c Config) (Watcher, error)          // fsnotify with poll fallback
 
-// FakeWatcher is a test helper. It emits a single ReOpened event for path at
-// pos, then EOF on subsequent Wait calls. Combine with a tmpfile populated by
-// the test for full LineReader unit-testability without a real polling loop.
-func FakeWatcher(path string, pos Position) Watcher
+// FakeWatcher is a test helper; it lives in the watchtest sub-package so the
+// production watch surface stays free of test-only symbols. It emits a single
+// ReOpened event for path at pos, then EOF on subsequent Wait calls. Combine
+// with a tmpfile populated by the test for full LineReader unit-testability
+// without a real polling loop.
+// (See watchtest.FakeWatcher.)
 
 // StatInode returns the platform-specific inode/file-id for path without
 // opening the file. Used by tail.findFileByInode to anchor a checkpointed
@@ -249,6 +216,11 @@ type LineOptions struct {
     BufferSize  int   // bufio buffer; 0 = 64 KiB
     MaxLine     int   // max line length before ErrLineTooLong; 0 = 1 MiB
     KeepNewline bool  // include trailing \n in returned bytes; default false
+
+    // L1 carries two observability hooks. They are intentionally on the L1
+    // surface so the LineReader can fire them at moments only it sees:
+    OnTruncated func(at Position)            // late-detection copytruncate (§5.6)
+    OnRotated   func(from, to Position)      // in-place rotation completion (§5.6)
 }
 
 func NewLineReader(w Watcher, opts LineOptions) *LineReader
@@ -598,7 +570,7 @@ This makes "fsnotify just works" the default while preserving an escape hatch fo
 - fsnotify on macOS via FSEvents has coarser granularity than inotify — events are coalesced. Latency is fine for tailing but not for sub-millisecond accuracy.
 - fsnotify cannot watch a file that doesn't exist yet. We need to watch the *parent directory* and react to creates. Already what the fsnotify package does, but worth noting.
 
-**Hybrid mode (recommended for v2.1):** fsnotify watches the parent directory for create/rename events; the active file is read until EOF on each notification; a 10s poll is a backstop for missed events. This is what `tail -F` does on modern systems. Out of scope for v2.0 to keep the surface small; design the API so it can be added without breaking changes (a `WatchMode` enum: `Poll | Fsnotify | Hybrid`).
+**Hybrid mode (not yet implemented):** fsnotify watches the parent directory for create/rename events; the active file is read until EOF on each notification; a 10s poll is a backstop for missed events. This is what `tail -F` does on modern systems. Kept out of the current surface to stay small; the API is designed so it can be added without breaking changes (a `WatchMode` enum: `Poll | Fsnotify | Hybrid`).
 
 ### 5.2 Platform support
 
@@ -614,7 +586,7 @@ This makes "fsnotify just works" the default while preserving an escape hatch fo
 
 **Implementation plan for inode/file-id:**
 
-- `stat_unix.go` (build tag `unix`): pulls inode from `syscall.Stat_t.Ino`. No `golang.org/x/sys` dep needed; stdlib `syscall` suffices on the platforms we target. (v1 uses both `unix.Stat_t` and `syscall.Stat_t` in `file_state.go:60-67` but they're equivalent on every supported platform; drop the x/sys dep.)
+- `stat_unix.go` (build tag `unix`): pulls inode from `syscall.Stat_t.Ino`. No `golang.org/x/sys` dep needed; stdlib `syscall` suffices on the platforms we target.
 - `stat_windows.go` (build tag `windows`): calls `GetFileInformationByHandle` via `syscall.GetFileInformationByHandle`. Combine `nFileIndexHigh<<32 | nFileIndexLow` into a `uint64`. Note in doc comment: stable on NTFS, *not* stable on ReFS or some network filesystems.
 - `tail.Options.NoInodeCheck bool` — disables the equality check entirely. The flag lives on `Options` (not on `FileCursorOption`) because the inode comparison happens in the watcher / `findFileByInode`, not inside the cursor. Use case: Windows ReFS, FUSE mounts, anything where inode reuse is known to happen. Trades robustness against rotation for cross-platform predictability.
 
@@ -622,7 +594,7 @@ This makes "fsnotify just works" the default while preserving an escape hatch fo
 
 - **Windows file locking semantics differ from Unix.** Default Windows opens are non-shared by default; we must use `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` so writers can keep appending while we read. Already what `os.Open` does via `syscall.Open` on Windows, but verify with a test.
 - **Windows rename semantics.** On Windows you cannot rename over an open file; lumberjack on Windows handles this via `MoveFileEx`, but a naive rotation tool may fail. Out of scope to fix in gotail, but document that we follow whatever the writer does.
-- **Symlink handling.** v1 uses `os.Open` which follows symlinks. v2 keeps this; we tail the *target*, not the link. If the symlink is swapped (k8s ConfigMap-style), the inode will change and we treat it as rotation. Add a test.
+- **Symlink handling.** gotail opens with `os.Open`, which follows symlinks, so we tail the *target*, not the link. If the symlink is swapped (k8s ConfigMap-style), the inode changes and we treat it as rotation.
 - **Plan 9 / WASM.** Excluded via build constraints. The `stat_*.go` files use `//go:build unix || windows`.
 
 ### 5.3 Built-in checkpointing
@@ -751,8 +723,8 @@ WithSyncBackgroundInterval(d)     // requires WithSyncMode(SyncBackground); erro
 
 | Layer | Hook | Signature | When |
 |---|---|---|---|
-| L2 | `OnDropped` | `func(droppedFiles int)` | Cursor's file is missing on resume; `droppedFiles` = how many backups have aged off |
-| L2 | `OnRotated` | `func(from, to Position)` | Watcher detected rotation and switched files |
+| L2 | `OnDropped` | `func(droppedFiles int)` | Cursor's file is missing on resume; `droppedFiles` is always 1 (signals "a drop occurred"; precise historical count is not tracked) |
+| L2 | `OnRotated` | `func(from, to Position)` | Fires on rotation. Two firing sites: (a) LineReader-detected in-place rotation (new inode at watched path), (b) Tailer.advance stepping to the next file in the Source enumeration |
 | L2 | `OnTruncated` | `func(at Position)` | File size dropped below current position |
 | L2 | `OnCheckpoint` | `func(c Checkpoint)` | Cursor.Save returned successfully |
 | L2 | `OnError` | `func(err error)` | Non-fatal error during tail |
@@ -791,14 +763,14 @@ forward.New(forward.Options[[]byte]{
 
 **Rotation schemes to handle:**
 
-| Scheme | How it works | v2 detection | Behavior |
+| Scheme | How it works | Detection | Behavior |
 |---|---|---|---|
-| **rename + create** (logrotate default, lumberjack) | Old file renamed to `.1`, new file created at original path | New inode at named path != currently-open inode | Drain old file to EOF, close, open new file at offset 0. **Same as v1.** |
-| **copytruncate** (logrotate `copytruncate`) | Old file is `cp`'d to `.1`, then `:>` truncates the original to size 0; **inode unchanged** | File size < current position | Detect via stat, emit `OnTruncated`, reset position to 0 (or to the new size if mid-write), continue reading from current open fd. New behavior. v1 docs say "will NOT work correctly on files that are truncated" (`README.md:19-20`). |
-| **symlink swap** (k8s pod logs, atomic config swap) | Symlink target replaced atomically | New inode at named path != currently-open inode | Same as rename+create. v2 should handle this; add a test with `os.Symlink` + `os.Rename`. |
-| **inode reuse** | Old file deleted, new file created, OS reuses the same inode | Stat says same inode but size < position | Treat as truncation: same path as copytruncate. The "size < position" check (already in v1's `SeekIfMatches`, `file_state.go:46-48`) saves us. |
+| **rename + create** (logrotate default, lumberjack) | Old file renamed to `.1`, new file created at original path | New inode at named path != currently-open inode | Drain old file to EOF, close, open new file at offset 0. |
+| **copytruncate** (logrotate `copytruncate`) | Old file is `cp`'d to `.1`, then `:>` truncates the original to size 0; **inode unchanged** | File size < current position | Detect via stat, emit `OnTruncated`, reset position to 0 (or to the new size if mid-write), continue reading from current open fd. |
+| **symlink swap** (k8s pod logs, atomic config swap) | Symlink target replaced atomically | New inode at named path != currently-open inode | Same as rename+create. |
+| **inode reuse** | Old file deleted, new file created, OS reuses the same inode | Stat says same inode but size < position | Treat as truncation: same path as copytruncate. The "size < position" check handles it. |
 | **mid-write truncation** | Process truncates own log without rotating | Size drops mid-tail | Emit `OnTruncated`; reset position to 0; continue. |
-| **delete + recreate** | Old file unlinked, new file created at same path | New inode appears at path; we still hold the old fd open | Drain old file (via the v1 trailing-bytes trick at `poll_watcher.go:131-143`), close, open new. |
+| **delete + recreate** | Old file unlinked, new file created at same path | New inode appears at path; we still hold the old fd open | Drain old file (via the trailing-bytes drain on the still-open fd), close, open new. |
 
 **Implementation notes:**
 
@@ -814,7 +786,7 @@ forward.New(forward.Options[[]byte]{
 - copytruncate detection requires per-tick stat of the *open fd* (not just the path). `pollWatcher.Wait` already does this (`poll_watcher.go:106`). The only change: handle `Size < Position` by truncating instead of declaring an error.
 - Inode reuse + small-file edge case: if the new file is opened via the `rename+create` path but happens to inherit the same inode the old file had (rare but possible after long uptime), the existing `SeekIfMatches` would happily seek into it. Mitigation: when crossing rotation, *always* start the new file at offset 0 regardless of `StartState`. This is already implicit in `pollWatcher.Wait` — it only consults `StartState` on the very first open (`poll_watcher.go:165`).
 
-**Open fd rotation hardening:** v1 closes the old fd as soon as it confirms a rotation (`poll_watcher.go:147`). v2 should keep this — holding stale fds open delays the kernel reclaiming the disk space (the unlinked file can't be freed until all fds close). For multi-file `Source`s the lifecycle is per-file: each file gets its own open/read/close cycle.
+**Open fd rotation hardening:** the old fd is closed as soon as rotation is confirmed — holding stale fds open delays the kernel reclaiming the disk space (the unlinked file can't be freed until all fds close). For multi-file `Source`s the lifecycle is per-file: each file gets its own open/read/close cycle.
 
 **Test scenarios** (each becomes a test case):
 
@@ -942,19 +914,19 @@ fwd, _ := forward.New(forward.Options[Event]{
 
 ### 5.10 (Bonus) Additional improvements not on the user's list
 
-These are best-in-class additions a v2 should ship:
+Additional improvements beyond the core requirements:
 
-1. **`watch.NewLineReader` honors `bufio.Scanner`-style buffer caps.** v1 uses default `bufio.NewReader` (4 KiB) and `ReadBytes('\n')` with no cap, so a pathologically long line OOMs the process. v2: configurable `MaxLine` (default 1 MiB), with `ErrLineTooLong` returned when exceeded; `OnError` hook fires and reader skips to next newline.
+1. **`watch.NewLineReader` honors `bufio.Scanner`-style buffer caps.** A configurable `MaxLine` (default 1 MiB) bounds line length, with `ErrLineTooLong` returned when exceeded; the `OnError` hook fires and the reader skips to the next newline. Without a cap, a pathologically long line would OOM the process.
 
 2. **Header skipping / start-from-end-of-current.** Many log readers want "tail -n 0" (skip everything currently in the file, only return new lines). Already supported via `Whence: io.SeekEnd`, but make it discoverable in the high-level API: `tail.Options.SkipExisting bool`.
 
 3. **Position invariant tests.** Property-based test: for any sequence of `(write, rotate, write, ...)` events, every byte written by the writer is yielded exactly once across all `Records` calls. Fuzz the timing of poll ticks. Catches whole classes of regressions in the rotation logic.
 
-4. **Graceful shutdown semantics.** `Tailer.Close()` should drain the current line, save the cursor one last time, and return. Provide `Tailer.CloseWithFlush(ctx)` for callers that want to ensure the cursor is durable before exit. (Default `Close()` flushes synchronously — there's no separate flush in `SyncAlways` mode.)
+4. **Graceful shutdown semantics.** `Tailer.Close()` discards any pending uncommitted line and does not advance the cursor (Decision #19); it is terminal and idempotent. Callers that want the most-recently-yielded position persisted before exit use `Tailer.CloseWithFlush(ctx)`, which saves the cursor — and drives `Sync` under `SyncOnCommit`/`SyncBackground` — before the normal teardown.
 
 5. **`Tailer.Stats()` snapshot.** A pull-style alternative to push-style hooks, for callers that prefer scraping. Returns counts of bytes read, lines yielded, rotations seen, errors, current position. Atomic snapshot; cheap.
 
-6. **Backoff jitter.** v1 has none. v2: full-jitter exponential backoff with configurable jitter factor. Prevents thundering-herd retries when a fleet of gotail-using processes sees the same upstream blip.
+6. **Backoff jitter.** Full-jitter exponential backoff with a configurable jitter factor. Prevents thundering-herd retries when a fleet of gotail-using processes sees the same upstream blip.
 
 7. **Context-aware `Sink`.** The `Sink[T].Send(ctx, batch)` signature includes the context. A misbehaving sink that ignores ctx will hang the forwarder; document that ctx must be respected, and provide a helper `WithSinkTimeout[T](d)` that wraps a `Sink[T]` in a per-call context with deadline. The helper is parameterised on T so the wrapped sink retains its element type.
 
@@ -966,7 +938,7 @@ These are best-in-class additions a v2 should ship:
 
 11. **`watch.Position.IsZero()`.** Trivial, but having a canonical zero check prevents the bug where consumers compare positions field-by-field.
 
-12. **Drop `golang.org/x/sys` dependency.** v1 imports it (`go.mod:5`, `file_state.go:9`) but only uses `unix.Stat_t`, which is identical to `syscall.Stat_t` on every platform we target. v2: stdlib only.
+12. **No `golang.org/x/sys` direct dependency.** Inode stat uses stdlib `syscall.Stat_t`, which is sufficient on every platform we target; `x/sys` appears only as an indirect dep pulled by `fsnotify` (and is dropped entirely under `gotail_nofsnotify`).
 
 ---
 
@@ -1024,9 +996,7 @@ BenchmarkForwarder_Throughput-14   6646902   178.4 ns/op   5604866 records/s   2
 
 #### Strategy 3: Avoid `bufio.NewReader` reallocation on rotation
 
-v1 calls `bufio.NewReader(s.File)` every time the file is reopened (`line_reader.go:134`). Each call allocates a 4 KiB buffer. Under aggressive rotation (every minute), this is a leak in slow-motion.
-
-v2: own the buffer; on rotation, just `Reset` it (set `head = tail = 0`). The buffer survives; only the underlying `io.Reader` changes.
+The `LineReader` owns its buffer; on rotation it just resets the buffer (`head = tail = 0`) — the buffer survives, only the underlying `io.Reader` changes. Allocating a fresh buffer per reopen would, under aggressive rotation, be a leak in slow-motion.
 
 #### Strategy 4: Pool `Record`s (L2)
 
@@ -1086,7 +1056,7 @@ Top 5 functions should be: `bytes.IndexByte`, `os.(*File).Read`, `runtime.memmov
 - `TestPollingWatcher_Truncation` — write, truncate, write; verify `OnTruncated`-equivalent path returns from offset 0 with `ErrTruncated` or via callback.
 - `TestPollingWatcher_SymlinkSwap` — `os.Symlink` to fileA, tail, then `os.Rename` symlink to fileB; verify rotation detection.
 - `TestLineReader_LongLine` — line longer than `MaxLine`; verify `ErrLineTooLong` and recovery.
-- `TestLineReader_CRLF` — preserve v1's CRLF stripping behavior (`line_reader.go:140-144`).
+- `TestLineReader_CRLF` — pins the CRLF stripping behavior.
 - `TestLineReader_BufferReuse` — assert returned slice is invalidated by next `Next` call (use a probe that mutates).
 - `TestLineReader_NoAlloc` — `testing.AllocsPerRun` must be 0 on the happy path.
 - `TestContextCancellation` — `ctx.Cancel()` mid-`Wait` returns promptly with `ctx.Err()`.
@@ -1130,7 +1100,7 @@ Use `testing/quick` (stdlib) or `github.com/leanovate/gopter` (one external dep,
 
 **Invariant 2 (commit durability):** for any random sequence of (write, commit, simulated-crash, restart), no byte is yielded twice, and no committed byte is lost.
 
-**Invariant 3 (rotation safety):** when the rotation race is provoked (write to old file *after* new file exists at path *before* old file's prior size was checked), all bytes from the old file are still yielded before any from the new file. The v1 trick (`poll_watcher.go:131-143`) protects this; the test ensures we don't regress.
+**Invariant 3 (rotation safety):** when the rotation race is provoked (write to old file *after* new file exists at path *before* old file's prior size was checked), all bytes from the old file are still yielded before any from the new file. The trailing-bytes drain on the still-open fd protects this; the test ensures we don't regress.
 
 ### Platform-specific tests
 
@@ -1192,85 +1162,36 @@ func FuzzCursorParse(f *testing.F) {
 
 ---
 
-## 8. Migration Path
+## 8. Module versioning
 
-### What v1 users see
-
-- The current import path is `github.com/jacobcase/gotail` (single package). v2 splits this into three sub-packages.
-- Two options: hard cut or compat shim.
-
-### Recommendation: hard cut, document loudly
-
-**Why:** v1 has no known external users that depend on it today. The library is small enough that any user porting from v1 will rewrite ~30 lines, not 3000. A compat shim adds permanent maintenance cost for a vanishingly small audience.
-
-The README should add:
-
-```markdown
-## v1 → v2
-
-v1 (`github.com/jacobcase/gotail.Watcher`, `.LineReader`, `.FileState`)
-is deprecated and will not receive updates after v2.0. The v1 source
-remains tagged as `v1.x.x`; new development happens under v2 module
-paths.
-
-For a v1-equivalent shape:
-
-| v1                     | v2                                          |
-|------------------------|---------------------------------------------|
-| `tail.Config`          | `watch.Config` (renamed fields, ctx-aware)  |
-| `tail.NewPollingWatcher` | `watch.NewPolling`                       |
-| `tail.NewLineReader`   | `watch.NewLineReader`                       |
-| `tail.FileState`       | `watch.Position` (renamed for clarity)      |
-| `LineReader.Next() bool` + `Bytes()` + `Err()` | `LineReader.Next(ctx) ([]byte, Position, error)` |
-```
-
-### Module versioning
-
-- Tag the current `main` as `v1.0.0` (or `v0.9.0` if the user prefers signaling pre-1.0). v1 enters maintenance: critical bug fixes only.
-- Begin v2 work on a `v2` branch. New module path: `github.com/jacobcase/gotail/v2` (Go module versioning convention for major versions).
-- Sub-packages: `.../v2/watch`, `.../v2/tail`, `.../v2/forward`.
-- Once v2 is stable, tag `v2.0.0` on the v2 branch. Keep `main` pointing at v2.
-
-### Compat shim — *optional*, only if a user materializes
-
-If a v1 user materializes and complains, ship `github.com/jacobcase/gotail/v2/compat` that re-exports v1 types backed by v2 implementations:
-
-```go
-// Package compat provides v1 API compatibility on top of v2.
-// New code should not use this package.
-package compat
-
-type Config = struct { /* old shape */ }
-type Watcher = struct { /* delegates to watch.Watcher */ }
-// ... etc
-```
-
-Don't ship this preemptively.
+- The module path carries the major version: `github.com/jacobcase/gotail/v3`.
+- Sub-packages: `.../v3/watch`, `.../v3/tail`, `.../v3/forward`.
+- A new major version — and the corresponding `/vN` path bump — is cut only for a backward-incompatible change to an exported identifier (verified with `apidiff` against the latest released tag). Additive changes ship as a minor release; bug fixes as a patch.
 
 ---
 
 ## 9. Decisions
 
-All decisions below are locked in before implementation begins.
+Design decisions and their rationale.
 
 | # | Question | Decision | Rationale |
 |---|---|---|---|
-| 1 | Module name: `github.com/jacobcase/gotail/v2` (vN suffix) or new repo? | `gotail/v2` | Standard Go module-versioning idiom; preserves history. |
+| 1 | Module name: `github.com/jacobcase/gotail/vN` (vN suffix) or new repo? | `gotail/vN` suffix | Standard Go module-versioning idiom; preserves history. |
 | 2 | Min Go version | **Go 1.26 or later** | User-specified. Comfortably above the 1.23 floor needed for `iter.Seq2`; gives access to all current stdlib improvements. |
 | 3 | fsnotify: vendor it via build tag, or build our own? | Build tag in fsnotify. Default off. | Re-implementing risks reproducing platform bugs fsnotify already fixed. Build tag preserves zero-deps default. |
-| 4 | Drop `golang.org/x/sys`? | Yes as a direct dependency. Stdlib `syscall` is sufficient on every platform we target; v1's dual-switch is dead code. `x/sys` remains in `go.mod` as an indirect dep pulled by `fsnotify`; the `gotail_nofsnotify` build tag drops it entirely. | Direct-dep-clean is the goal; transitive pulls inherited from a vetted upstream are acceptable. |
+| 4 | Drop `golang.org/x/sys` as a direct dependency? | Yes. Stdlib `syscall` is sufficient on every platform we target. `x/sys` remains in `go.mod` as an indirect dep pulled by `fsnotify`; the `gotail_nofsnotify` build tag drops it entirely. | Direct-dep-clean is the goal; transitive pulls inherited from a vetted upstream are acceptable. |
 | 5 | Cursor format: JSON or binary? | JSON | Human-inspectable, schema-evolution friendly, encoding cost is irrelevant at ~100 bytes. |
 | 6 | Cursor file `Meta` size cap? | 64 KiB, return error on oversize | Prevents accidental log-aggregation footguns. Generous enough for any reasonable use. |
-| 7 | Default poll interval? | 1 second (matches v1) | Balance of responsiveness and idle CPU. Override per-Tailer. |
+| 7 | Default poll interval? | 1 second | Balance of responsiveness and idle CPU. Override per-Tailer. |
 | 8 | Default `MaxLine` for LineReader? | 1 MiB | Matches `bufio.MaxScanTokenSize` × 16. Most logs are <1 KiB; pathological cases exist; avoid OOM. |
 | 9 | Should L2 expose `Tailer.Position()`? | Yes | Lets non-iterator users introspect without consuming a record. |
 | 10 | Should L3 own the flock or L2? | L2 | Flock protects the cursor; cursor is L2's asset. Future L2-only consumers still get protection. |
 | 11 | Should `Forwarder.Run` be re-entrant after returning? | No | One-shot. Document. Construct a new Forwarder if you want to restart. |
-| 12 | Compressed backup file support (.gz)? | Detection ships in v2.0; decompression deferred to v2.1. `Lumberjack` and `Logrotate` recognise `.gz` variants and skip them, surfacing the skipped path via `WithLumberjackSkippedHook` / `WithLogrotateSkippedHook` for observability. A checkpoint pointing at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy. | Skip-and-observe is cheap and prevents silent data omission; full decompression adds the bytes-vs-offset semantic axis and waits for v2.1. |
-| 13 | Hybrid fsnotify+poll mode? | Defer to v2.1 | Single-mode is correct; hybrid is a latency optimization. Design API to allow later addition. |
-| 14 | Should we ship a CLI binary (`cmd/gotail`)? | Yes, small one | Replaces some `tail -F` use cases; serves as integration test. ~50 LOC. |
+| 12 | Compressed backup file support (.gz)? | Detect and skip; decompression not implemented. `Lumberjack` and `Logrotate` recognise `.gz` variants and skip them, surfacing the skipped path via `WithLumberjackSkippedHook` / `WithLogrotateSkippedHook` for observability. A checkpoint pointing at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy. | Skip-and-observe is cheap and prevents silent data omission; full decompression adds the bytes-vs-offset semantic axis and remains future work. |
+| 13 | Hybrid fsnotify+poll mode? | Not implemented; future work | Single-mode is correct; hybrid is a latency optimization. Design API to allow later addition. |
+| 14 | Should we ship a CLI binary (`cmd/gotail`)? | Yes, small one — `tail -F` shape only, L1/L2 path. End-to-end L3 coverage lives in the `forward` package tests (incl. `httptest.Server`-backed integration tests), not in the CLI. ~50–80 LOC. |
 | 15 | Default `MissingPolicy` for `OnMissingCheckpoint`? | `FallbackOldest` | Matches driving requirement #4 (lose nothing, accept duplicates). Most graceful default for at-least-once shippers. |
-| 16 | License of v2? | Same as v1 (file `LICENSE`) | No reason to change. |
+| 16 | License? | See file `LICENSE` | — |
 | 17 | Should the Watcher port expose an `io.Reader`? | No. The Watcher/LineReader split (§4 L1) means LineReader owns the only `*os.File`; the Watcher emits state-transition events only. After a `ReOpened` event the LineReader keeps reading the previous fd to `io.EOF` before opening the new path, preserving the rotation-race trailing-bytes drain without crossing an `io.Reader` through the port. | Single-fd, single-owner is simpler and removes the duplicate-fd race window. |
 | 18 | Iterator semantics on error? | Yield `(zero, err)` then stop iteration | Matches `iter.Seq2` idiom; caller's `for line, err := range` checks err on each iteration. |
 | 19 | What does `Tailer.Close()` do with a pending uncommitted line? | Discard. Cursor is *not* auto-advanced. | Caller's responsibility. Consistent with "library does not guess durability point". |
@@ -1281,133 +1202,11 @@ All decisions below are locked in before implementation begins.
 
 ---
 
-## 10. Implementation Phases
+## 10. Out of scope / future work
 
-Suggested ordering. Each phase is independently mergeable and reviewable. Estimated LOC includes tests.
+Deliberately not implemented. The API is designed so each can be added without a breaking change.
 
-### Phase 0 — Project housekeeping (~50 LOC)
-
-- Create `v2` branch.
-- Bump `go.mod` to Go 1.26 or later.
-- Add `staticcheck` + `golangci-lint` config.
-- Add CI matrix: Linux, macOS, Windows.
-- Move existing v1 code under a temporary `v1/` directory inside the v2 branch (so tests still pass while new code is added). Optional; can also just leave v1 on main.
-
-### Phase 1 — L1 `watch` package (~600 LOC + ~400 LOC tests)
-
-- Create `watch/` directory.
-- Port `Config` → `watch.Config`. Add `context.Context` to `Wait`. Rename `FileState` → `Position`.
-- Port `pollWatcher` → `watch.NewPolling`. Drop the unused mutex. Drop the `cancel chan struct{}`. Use ctx.
-- Port `LineReader` → `watch.NewLineReader`. Replace `Next() bool` + `Bytes()` + `Err()` with `Next(ctx) ([]byte, Position, error)`. Implement zero-alloc buffer ownership (Section 6).
-- Implement `stat_unix.go` and `stat_windows.go`.
-- Drop `golang.org/x/sys` dependency.
-- Port and expand `TestReadAfterWatcher` and `TestLineReaderResume`.
-- Add the unit tests listed in Section 7.
-
-**Deliverable:** v2 callers can use L1 standalone. No checkpointing yet.
-
-### Phase 2 — L2 `tail` package, single-file source (~400 LOC + ~400 LOC tests)
-
-- Create `tail/` directory.
-- Implement `Source` interface, `SingleFile` constructor.
-- Implement `Cursor` interface, `MemoryCursor`, `FileCursor` (without flock yet).
-- Implement `internal/atomicwrite` helper.
-- Implement `Tailer` orchestrating Source + Watcher + Cursor + LineReader.
-- `Tailer.Records` (`iter.Seq2`) and `Tailer.Next` (pull-style).
-- `Tailer.Commit`, `Tailer.CommitWithMeta`.
-- `OnMissingCheckpoint` with `Fail` and `SkipToActive` (no FallbackOldest yet — single-file source).
-- Tests for resume across restart, commit durability, ctx cancellation.
-
-**Deliverable:** L2 works for single files. Driving reqs 2, 6, 7 satisfied for single-file case.
-
-### Phase 3 — L2 multi-file Source + flock (~300 LOC + ~250 LOC tests)
-
-- Implement `Lumberjack(activePath)` Source — recognizes `<base>-YYYY-MM-DDTHH-MM-SS.<ext>` naming.
-- Implement `Glob(active, backupGlob)` Source.
-- Implement `WithFlock(lockPath)`, including platform-specific `flock_unix.go` / `flock_windows.go`.
-- Implement `FallbackOldest` policy and `OnDropped` hook.
-- Tests: lumberjack source enumeration, flock conflict, missing-checkpoint fallback.
-
-**Deliverable:** L2 satisfies driving reqs 1, 3, 4. A consumer that brings its own batching/shipping logic can adopt at this layer without waiting for L3.
-
-### Phase 4 — L2 rotation hardening (~150 LOC + ~250 LOC tests)
-
-- Truncation detection in `pollWatcher.Wait` + `OnTruncated` hook.
-- Symlink-swap test.
-- Inode-reuse test.
-- Property-based test for the offset invariant (Section 7).
-
-**Deliverable:** rotation correctness. README's "will NOT work correctly on files that are truncated" line is removed.
-
-### Phase 5 — L3 `forward` package (~400 LOC + ~400 LOC tests)
-
-- Create `forward/` directory.
-- Implement `Sink[T]`, `SinkFunc[T]`, `Decoder[T]`, `IdentityDecoder`, `IdentityDecoderCopy`, `JSONDecoder[T]`.
-- Implement `Forwarder[T]` with batching by count/bytes/age.
-- Implement exponential backoff with jitter.
-- Implement all `OnX` hooks.
-- Implement `forwardtest.RecordingSink[T]` and `FailingSink[T]`.
-- End-to-end test: lumberjack writer → tail → forwarder → `httptest.Server` sink.
-
-**Deliverable:** v2 is feature-complete. Driving req 5 satisfied. A typical consumer's hand-rolled forwarder collapses to ~50 LOC of `forward.Options[T]` configuration.
-
-### Phase 6 — fsnotify backend (optional, ~250 LOC + ~150 LOC tests)
-
-- Implement `watch.NewFsnotify`. Default-on; opt out with the `gotail_nofsnotify` build tag.
-- Implement `watch.New` with auto-fallback to polling.
-- Tests for the fsnotify path (gated on the same negative tag).
-
-**Deliverable:** sub-millisecond latency by default, with an escape hatch for distroless builds.
-
-### Phase 7 — Polish & docs (~100 LOC code + lots of prose)
-
-- README rewrite with v1-vs-v2 migration table.
-- `docs/metrics-prometheus.md`, `docs/metrics-otel.md`.
-- `docs/cookbook/` with the worked examples (HTTPS forwarder, archived-file backfill, standalone tailer).
-- `cmd/gotail` CLI binary (~50 LOC) — `gotail -f /var/log/foo.log`, integration smoke test.
-- Benchmarks committed (Section 6) + benchstat baseline.
-- godoc review pass: every exported type has a doc comment; every package has a `doc.go` overview.
-
-**Deliverable:** v2.0.0 release-ready.
-
-### Phase 8 — Out of scope for v2.0, design space for v2.1+
-
-- Hybrid fsnotify+poll watcher.
-- Compressed backup file (.gz) source.
-- Compat shim if a v1 user materializes.
+- Hybrid fsnotify+poll watcher (a `WatchMode` enum: `Poll | Fsnotify | Hybrid`; see §5.1).
+- Compressed backup file (`.gz`) decompression — `.gz` backups are currently detected and skipped (Decision #12).
 - Plugin cursors (Redis, SQL) as separate modules.
 - Per-event filtering hooks at L2.
-
-### Estimated total
-
-~2,250 LOC of new code, ~1,850 LOC of new tests. Roughly two engineer-weeks of focused work, structured as 8 PRs.
-
----
-
-## Appendix: File-level cross-reference
-
-Where each piece of v1 code maps to v2:
-
-| v1 | v2 |
-|---|---|
-| `tail.go:18-42` (`Config`) | `watch/watch.go` (`Config`); some fields move to `tail/tail.go` (`Options`) |
-| `tail.go:46-63` (`WaitStatus`) | `watch/watch.go` (`Event`; Watcher emits state transitions only, LineReader owns its own fd and drains the previous file to EOF on `ReOpened`) |
-| `tail.go:66-78` (`Watcher`) | `watch/watch.go` (`Watcher`, ctx-aware) |
-| `tail.go:9-14` (`ErrorHandler`) | Removed; replaced by `OnError` callback fields |
-| `line_reader.go:14-28` (`LineReader` struct) | `watch/linereader.go` (rewritten with owned buffer) |
-| `line_reader.go:35-51` (`NewLineReader`) | `watch/linereader.go` (`NewLineReader(w Watcher, opts LineOptions)`) |
-| `line_reader.go:71-149` (`Next` + helpers) | `watch/linereader.go` (`Next(ctx)`, zero-alloc) |
-| `line_reader.go:155-180` (`Bytes`/`Err`/`Close`/`FileState`) | `watch/linereader.go` (`Position`/`Close`); `Bytes/Err` removed |
-| `file_state.go:20-24` (`FileState`) | `watch/watch.go` (`Position`) — same fields, renamed |
-| `file_state.go:32-55` (`SeekIfMatches`) | `watch/poll.go` internal; not exported (consumers use `Cursor` instead) |
-| `file_state.go:57-101` (stat helpers) | `watch/stat_unix.go` + `watch/stat_windows.go` |
-| `poll_watcher.go:14-24` (`pollWatcher` struct) | `watch/poll.go` (mutex dropped, ctx replaces cancel chan) |
-| `poll_watcher.go:29-54` (`NewPollingWatcher`) | `watch/poll.go` (`NewPolling`) |
-| `poll_watcher.go:56-150` (`Wait`) | `watch/poll.go` (preserves race-aware rotation logic from lines 131-143) |
-| `poll_watcher.go:152-177` (`openAndSeek`) | `watch/poll.go` internal helper |
-| `poll_watcher.go:179-190` (`Close`) | `watch/poll.go` (`Close`) |
-| `tail_test.go:141-181` (`TestReadAfterWatcher`) | `watch/poll_test.go` (port + expand) |
-| `line_reader_test.go:10-103` (`TestLineReaderResume`) | `tail/tailer_test.go` (port + expand; uses Cursor not StartState) |
-| `line_reader_test.go:119-148` (`TestLineReaderRotate`) | `watch/linereader_test.go` (port) |
-
-Nothing from v1 is wasted. The race-aware rotation logic, the inode-equality identity model, the byte-accurate position tracking — all of it is preserved verbatim in semantics, just packaged better.

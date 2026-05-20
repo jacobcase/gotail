@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/tail"
+	"github.com/jacobcase/gotail/v3/tail"
 )
 
 // Position is an alias for [tail.Position] so external implementations of
@@ -28,6 +29,13 @@ type Record = tail.Record
 // source is exhausted. It must honour ctx cancellation (including a deadline
 // derived from ctx by Forwarder for batch-age enforcement). To signal natural
 // exhaustion, return [tail.ErrSourceExhausted].
+//
+// Done signals exhaustion via a channel: closing it tells [Forwarder.Run] that
+// no further successful Next calls will return records. Run treats a Done
+// closure as exhaustion — it flushes any in-flight batch with retries against
+// the parent ctx and returns nil. Implementations should close Done at most
+// once. *tail.Tailer closes Done only in StopAtEOF mode; live-tail Tailers
+// never close it themselves.
 type RecordSource interface {
 	Next(ctx context.Context) (Record, error)
 	Commit(ctx context.Context, pos Position) error
@@ -98,9 +106,11 @@ type Options[T any] struct {
 // Forwarder reads lines from a [RecordSource], decodes them, batches them, and
 // delivers them to a [Sink] with at-least-once semantics.
 //
-// Run is one-shot; create a new Forwarder to run again.
+// Run is one-shot; create a new Forwarder to run again. A second call returns
+// an error rather than silently re-running over a possibly stateful source.
 type Forwarder[T any] struct {
 	opts Options[T]
+	ran  atomic.Bool
 }
 
 // New validates opts and returns a new Forwarder.
@@ -114,7 +124,7 @@ func New[T any](opts Options[T]) (*Forwarder[T], error) {
 	if opts.Sink == nil {
 		return nil, errors.New("forward: Options.Sink must not be nil")
 	}
-	// SE-4: reject negative batch limits explicitly (the prior `== 0` check
+	// reject negative batch limits explicitly (the prior `== 0` check
 	// silently accepted negatives, which then disabled flushing in the
 	// consumer because every guard is `> 0`).
 	if opts.MaxBatchRecords < 0 {
@@ -132,7 +142,7 @@ func New[T any](opts Options[T]) (*Forwarder[T], error) {
 	if opts.BackoffJitter < 0 || opts.BackoffJitter > 1 {
 		return nil, fmt.Errorf("forward: BackoffJitter must be in [0, 1], got %g", opts.BackoffJitter)
 	}
-	// SE-1: no implicit default for BackoffJitter — 0 means deterministic.
+	// no implicit default for BackoffJitter — 0 means deterministic.
 	if opts.MaxAttempts < 0 {
 		return nil, fmt.Errorf("forward: MaxAttempts must not be negative, got %d", opts.MaxAttempts)
 	}
@@ -157,6 +167,9 @@ func New[T any](opts Options[T]) (*Forwarder[T], error) {
 // deadline of (batchStart + MaxBatchAge) when a non-empty batch is in
 // flight; on context.DeadlineExceeded the batch is flushed.
 func (f *Forwarder[T]) Run(ctx context.Context) error {
+	if !f.ran.CompareAndSwap(false, true) {
+		return errors.New("forward: Forwarder.Run is one-shot; construct a new Forwarder to run again")
+	}
 	// Inner ctx that cancels on parent ctx OR Source.Done() closure. This
 	// catches the case where a 3rd-party RecordSource signals exhaustion via
 	// Done() but its Next keeps returning records (or blocks). Defers run
@@ -243,7 +256,7 @@ func (f *Forwarder[T]) Run(ctx context.Context) error {
 			if f.opts.OnDecodeError != nil {
 				f.opts.OnDecodeError(rec.Line, rec.Pos, derr)
 			}
-			// SE-9: a Decoder may wrap ErrPermanent to abort Run on
+			// a Decoder may wrap ErrPermanent to abort Run on
 			// schema breakage rather than skip-and-advance. The cursor
 			// must NOT advance past the rejected record (no
 			// batchLastPos update before the early return).
@@ -297,14 +310,14 @@ func (f *Forwarder[T]) sendWithRetry(ctx context.Context, batch []T, bytes int, 
 			}
 			return fmt.Errorf("forward: permanent sink error: %w", err)
 		}
-		// ID-4: bound the retry loop when MaxAttempts is set. attempt is
+		// bound the retry loop when MaxAttempts is set. attempt is
 		// 0-based, so attempt+1 is the count of Send calls completed; once
 		// it reaches MaxAttempts there are no more attempts to make.
 		if f.opts.MaxAttempts > 0 && attempt+1 >= f.opts.MaxAttempts {
 			if f.opts.OnSendError != nil {
 				f.opts.OnSendError(err, attempt, false)
 			}
-			return fmt.Errorf("forward: gave up after %d attempts: %w", attempt+1, err)
+			return fmt.Errorf("forward: gave up after %d attempts: %w: %w", attempt+1, ErrMaxAttempts, err)
 		}
 		if f.opts.OnSendError != nil {
 			f.opts.OnSendError(err, attempt, true)
@@ -353,8 +366,17 @@ func (f *Forwarder[T]) jitteredBackoff(attempt int) time.Duration {
 
 // WithSinkTimeout returns a middleware that wraps a [Sink] so each Send call
 // has an independent per-call timeout derived from the parent context.
+//
+// d must be positive. A zero or negative duration would derive an
+// already-cancelled context every Send, which the Forwarder would interpret
+// as a transient error and retry forever (or up to MaxAttempts) — the
+// pathological config that a YAML-mapper bug with an unset duration field
+// produces. With d <= 0, WithSinkTimeout returns the input Sink unmodified.
 func WithSinkTimeout[T any](d time.Duration) func(Sink[T]) Sink[T] {
 	return func(s Sink[T]) Sink[T] {
+		if d <= 0 {
+			return s
+		}
 		return SinkFunc[T](func(ctx context.Context, batch []T) error {
 			ctx, cancel := context.WithTimeout(ctx, d)
 			defer cancel()

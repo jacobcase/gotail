@@ -1,4 +1,10 @@
 // Package forwardtest provides test helpers for the forward package.
+//
+// Construction idiom: helpers with required parameters expose a New*
+// constructor (e.g. [NewFailingSink] needs a failure count, error, and
+// inner sink). Helpers with no required parameters are zero-value-usable
+// — declare them with `var s RecordingSink[T]` and call methods directly.
+// The same rule applies in the sibling [tailtest] and [watchtest] packages.
 package forwardtest
 
 import (
@@ -7,7 +13,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/jacobcase/gotail/v2/forward"
+	"github.com/jacobcase/gotail/v3/forward"
 )
 
 // RecordingSink captures every batch delivered to it.

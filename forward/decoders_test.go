@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/jacobcase/gotail/v2/forward"
+	"github.com/jacobcase/gotail/v3/forward"
 )
 
 func TestIdentityDecoder_AliasesInput(t *testing.T) {

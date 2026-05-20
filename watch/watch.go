@@ -72,15 +72,20 @@ type Config struct {
 	// but has a different inode than [Config.Resume]. Default (false) is
 	// fail-safe: the watcher returns [ErrInodeMismatch] from its first Wait,
 	// preventing silent ingest of substituted content in shared-FS or
-	// multi-tenant deployments. Set to true to restore the pre-fix v2
-	// behaviour: log a warning, fire [OnInodeMismatch] (if set), and fall
-	// through to offset 0.
+	// multi-tenant deployments. Set to true to log a warning, fire
+	// [OnInodeMismatch] (if set), and fall through to offset 0.
 	AllowInodeMismatch bool
 	// OnInodeMismatch fires when the resume-time inode check fails (the
 	// file at Path exists but has a different inode than Resume.Inode).
 	// Optional and nil-safe. Fires before AllowInodeMismatch is honoured,
 	// so observers see the mismatch even when the watcher decides to fail.
 	OnInodeMismatch func(want, got uint64)
+	// Shutdown, if non-nil, makes a blocking [Watcher.Wait] return
+	// [ErrWatcherClosed] when the channel is closed. It lets an owner
+	// interrupt a live-tail Wait without cancelling the per-call ctx — e.g.
+	// [Tailer] closes it from Close to unblock Wait while leaving the caller's
+	// own ctx semantics untouched. Optional; a nil channel never fires.
+	Shutdown <-chan struct{}
 }
 
 // New returns a Watcher. It attempts NewFsnotify first; if that returns
@@ -118,4 +123,9 @@ var (
 	ErrTruncated = errors.New("watch: file was truncated below current position")
 	// ErrLineTooLong is returned by [LineReader.Next] when a line exceeds MaxLine.
 	ErrLineTooLong = errors.New("watch: line exceeds MaxLine")
+	// ErrWatcherClosed is returned by [Watcher.Wait] when the watcher's
+	// underlying event source has been closed concurrently with Wait (typically
+	// because [Watcher.Close] was called from another goroutine without
+	// cancelling the ctx passed to Wait).
+	ErrWatcherClosed = errors.New("watch: watcher closed")
 )

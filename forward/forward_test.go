@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/forward"
-	"github.com/jacobcase/gotail/v2/forwardtest"
-	"github.com/jacobcase/gotail/v2/tail"
+	"github.com/jacobcase/gotail/v3/forward"
+	"github.com/jacobcase/gotail/v3/forwardtest"
+	"github.com/jacobcase/gotail/v3/tail"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -473,6 +473,99 @@ func TestForwarder_StopAtEOF(t *testing.T) {
 	}
 }
 
+// TestForwarder_Run_IsOneShot pins the Decision #11 contract: a second Run
+// call on the same Forwarder must error rather than silently re-running.
+func TestForwarder_Run_IsOneShot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log.txt")
+	writeLines(t, path, []string{"a"})
+
+	tr := mustNewTailer(t, tail.Options{
+		Source:    tail.SingleFile(path),
+		Interval:  10 * time.Millisecond,
+		StopAtEOF: true,
+	})
+
+	fwd := mustNewForwarder(t, forward.Options[[]byte]{
+		Source:          tr,
+		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:            &forwardtest.RecordingSink[[]byte]{},
+		MaxBatchRecords: 1,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := fwd.Run(ctx); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if err := fwd.Run(ctx); err == nil {
+		t.Fatal("second Run: want error, got nil")
+	}
+}
+
+// TestForwarder_MaxAttempts_WrapsErrMaxAttempts pins BUG-7: when the Sink
+// fails MaxAttempts times in a row, Run returns an error chain that
+// matches both ErrMaxAttempts and the underlying sink error.
+func TestForwarder_MaxAttempts_WrapsErrMaxAttempts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log.txt")
+	writeLines(t, path, []string{"a"})
+
+	tr := mustNewTailer(t, tail.Options{
+		Source:   tail.SingleFile(path),
+		Interval: 10 * time.Millisecond,
+	})
+
+	sinkErr := errors.New("transient sink failure")
+	sink := forwardtest.NewFailingSink[[]byte](100, sinkErr, nil) // fails for all attempts in this test
+	fwd := mustNewForwarder(t, forward.Options[[]byte]{
+		Source:          tr,
+		Decoder:         forward.Decoder[[]byte](forward.IdentityDecoderCopy),
+		Sink:            sink,
+		MaxBatchRecords: 1,
+		InitialBackoff:  time.Millisecond,
+		MaxBackoff:      time.Millisecond,
+		MaxAttempts:     2,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := fwd.Run(ctx)
+	if !errors.Is(err, forward.ErrMaxAttempts) {
+		t.Fatalf("want ErrMaxAttempts in chain, got %v", err)
+	}
+	if !errors.Is(err, sinkErr) {
+		t.Fatalf("want underlying sink error in chain, got %v", err)
+	}
+}
+
+// TestWithSinkTimeout_RejectsNonPositive pins BUG-8: WithSinkTimeout(d<=0)
+// must not produce a wrapper whose ctx is already cancelled. The wrapper
+// returns the input Sink unmodified so the Forwarder doesn't see a
+// permanent context.DeadlineExceeded loop.
+func TestWithSinkTimeout_RejectsNonPositive(t *testing.T) {
+	called := 0
+	inner := forward.SinkFunc[[]byte](func(_ context.Context, _ [][]byte) error {
+		called++
+		return nil
+	})
+
+	for _, d := range []time.Duration{0, -1 * time.Second} {
+		wrapped := forward.WithSinkTimeout[[]byte](d)(inner)
+		if wrapped == nil {
+			t.Fatalf("WithSinkTimeout(%v) returned nil", d)
+		}
+		if err := wrapped.Send(context.Background(), [][]byte{[]byte("x")}); err != nil {
+			t.Fatalf("WithSinkTimeout(%v) wrapped Send: %v", d, err)
+		}
+	}
+	if called != 2 {
+		t.Fatalf("inner called %d times, want 2", called)
+	}
+}
+
 // ── TestForwarder_RecordingSink ───────────────────────────────────────────────
 
 func TestForwarder_RecordingSink(t *testing.T) {
@@ -809,7 +902,7 @@ func TestForwarder_BackoffJitter_OutOfRange(t *testing.T) {
 
 // doneClosableSource is a RecordSource whose Done() channel can be closed
 // externally. Next keeps returning records indefinitely until ctx cancels —
-// exactly the case the §11.4 #7 fix targets.
+// exactly the Source.Done() exit case the §4 L3 Run docstring covers.
 type doneClosableSource struct {
 	done chan struct{}
 }
@@ -825,7 +918,7 @@ func (s *doneClosableSource) Next(ctx context.Context) (tail.Record, error) {
 func (s *doneClosableSource) Commit(_ context.Context, _ forward.Position) error { return nil }
 func (s *doneClosableSource) Done() <-chan struct{}                              { return s.done }
 
-// TestForwarder_HonoursSourceDone pins §11.4 #7 / §4 L3 Run docstring:
+// TestForwarder_HonoursSourceDone pins the §4 L3 Run docstring:
 // when Source.Done() closes, Run must exit cleanly even if Next keeps
 // returning records.
 func TestForwarder_HonoursSourceDone(t *testing.T) {
@@ -853,9 +946,10 @@ func TestForwarder_HonoursSourceDone(t *testing.T) {
 	}
 }
 
-// TestForwarder_OnBatchSent_FullSignature pins the §11.1 #1 fix: the hook
-// receives records, bytes, pos, and latency — the four pieces of info plan
-// §4 L3 promised plus the position the implementation found useful.
+// TestForwarder_OnBatchSent_FullSignature pins the OnBatchSent signature
+// (§4 L3, §5.5): the hook receives records, bytes, pos, and latency — the
+// four pieces of info §4 L3 promised plus the position the implementation
+// found useful.
 // Latency reflects the successful Sink.Send call duration only (excludes
 // batch fill time and failed retries).
 func TestForwarder_OnBatchSent_FullSignature(t *testing.T) {
@@ -941,7 +1035,7 @@ func TestForwarder_CtxCancelStillReturnsCtxErr(t *testing.T) {
 
 // ── Security / hardening regression tests ────────────────────────────────────
 
-// TestNew_BackoffJitter_ZeroIsDeterministic (SE-1): BackoffJitter=0 must mean
+// TestNew_BackoffJitter_ZeroIsDeterministic: BackoffJitter=0 must mean
 // "deterministic" per the doc (all sleeps == ceiling). Currently New rewrites
 // 0 → 0.2, so sleeps are randomly in [0.8·ceiling, ceiling) and this test
 // will fail until the silent rewrite is removed.
@@ -982,7 +1076,7 @@ func TestNew_BackoffJitter_ZeroIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestNew_RejectsNegativeBatchLimits (SE-4): negative batch-limit values must
+// TestNew_RejectsNegativeBatchLimits: negative batch-limit values must
 // be rejected by New. Currently the validator only checks == 0, so any
 // negative value passes and disables flushing silently.
 func TestNew_RejectsNegativeBatchLimits(t *testing.T) {
@@ -1026,7 +1120,7 @@ func TestNew_RejectsNegativeBatchLimits(t *testing.T) {
 	}
 }
 
-// TestForwarder_MaxAttemptsLimitsRetries (ID-4): when MaxAttempts is set, Run
+// TestForwarder_MaxAttemptsLimitsRetries: when MaxAttempts is set, Run
 // must stop retrying after that many Sink.Send calls and return an error.
 // Currently MaxAttempts is not implemented; Run loops until ctx expires.
 func TestForwarder_MaxAttemptsLimitsRetries(t *testing.T) {
@@ -1062,7 +1156,7 @@ func TestForwarder_MaxAttemptsLimitsRetries(t *testing.T) {
 	}
 }
 
-// TestForwarder_DecoderPermanentError_AbortsRun (SE-9): when the Decoder
+// TestForwarder_DecoderPermanentError_AbortsRun: when the Decoder
 // returns a wrapped ErrPermanent, Run must return that error immediately.
 // Currently the permanent flag is never checked; the line is silently skipped,
 // the cursor advances, and Run returns nil. This test will pass once the

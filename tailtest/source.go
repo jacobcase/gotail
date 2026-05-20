@@ -1,4 +1,10 @@
 // Package tailtest provides test helpers for the tail package.
+//
+// Construction idiom: helpers with required parameters expose a New*
+// constructor; helpers with no required parameters (like [MemorySource])
+// are zero-value-usable — declare with `var ms tailtest.MemorySource`
+// and call methods directly. Mirrors the convention in [forwardtest]
+// and [watchtest].
 package tailtest
 
 import (

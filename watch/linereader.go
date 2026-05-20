@@ -28,6 +28,12 @@ type LineOptions struct {
 	// below the current read position. at is the position just before the reset.
 	// The callback fires before the reader seeks back to offset 0.
 	OnTruncated func(at Position)
+	// OnRotated is called when the LineReader completes an in-place rotation:
+	// the previous file has been fully drained to EOF and the new file (at the
+	// same path, different inode) has been opened. from is the final position
+	// on the rotated-out inode; to is the new file's starting position.
+	// Optional and nil-safe.
+	OnRotated func(from, to Position)
 }
 
 // LineReader frames newline-delimited lines on top of a [Watcher]. It opens
@@ -40,7 +46,8 @@ type LineOptions struct {
 // LineReader is not safe for concurrent use, including Close. To stop a
 // blocked Next from another goroutine, cancel the ctx passed to Next; once
 // Next has returned, Close may run on the same goroutine. [Tailer] coordinates
-// this internally via context.AfterFunc and a WaitGroup.
+// this internally by closing the Watcher's Shutdown channel and serializing
+// teardown against the in-flight Next with an RWMutex.
 type LineReader struct {
 	w    Watcher
 	opts LineOptions
@@ -125,6 +132,17 @@ func (l *LineReader) Next(ctx context.Context) (line []byte, pos Position, err e
 
 		// ── Read from active source ──────────────────────────────────────────
 		if l.src != nil {
+			// Reset to the start of the buffer when fully drained, so the read
+			// targets the full buffer instead of a zero-length slice past tail.
+			// Without this, a buffer whose capacity is an exact multiple of the
+			// line length leaves head==tail==len(buf) after the final line in a
+			// fill is yielded; the next Read returns (0, nil) and the loop
+			// falls through to Watcher.Wait, dropping any file content past the
+			// boundary in StopAtEOF mode and blocking forever in live mode.
+			if l.head == l.tail {
+				l.head = 0
+				l.tail = 0
+			}
 			n, rerr := l.src.Read(l.buf[l.tail:])
 			if n > 0 {
 				l.tail += n
@@ -153,9 +171,10 @@ func (l *LineReader) Next(ctx context.Context) (line []byte, pos Position, err e
 			}
 			// Detect truncation the polling watcher may have missed: if our fd
 			// position is past the current file size, the file was truncated
-			// (and possibly rewritten) while the watcher's p.pos watermark was
-			// still below our position. This handles copytruncate scenarios
-			// where the new content is smaller than the old content.
+			// (and possibly rewritten) between watcher ticks while the
+			// watcher's last-emitted size was still below our position. This
+			// handles copytruncate scenarios where the new content is smaller
+			// than the old content.
 			if l.f != nil && l.pos.Offset > 0 {
 				if fi, serr := l.f.Stat(); serr == nil && fi.Size() < l.pos.Offset {
 					if l.opts.OnTruncated != nil {
@@ -228,7 +247,14 @@ func (l *LineReader) openNewFile() error {
 	pos := l.pendingNewPos
 	l.pendingNewFile = ""
 	l.pendingNewPos = Position{}
-	return l.switchToFile(path, pos)
+	from := l.pos
+	if err := l.switchToFile(path, pos); err != nil {
+		return err
+	}
+	if l.opts.OnRotated != nil {
+		l.opts.OnRotated(from, pos)
+	}
+	return nil
 }
 
 // switchToFile closes any existing fd and opens the file at path, seeking to

@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jacobcase/gotail/v2/internal/atomicwrite"
+	"github.com/jacobcase/gotail/v3/internal/atomicwrite"
 )
 
-// TestWrite_RejectsSymlinkAtTmp (ID-1): Write must not follow a pre-positioned
+// TestWrite_RejectsSymlinkAtTmp: Write must not follow a pre-positioned
 // symlink at path+".tmp". Currently Write uses O_TRUNC with no O_NOFOLLOW,
 // so it opens through the symlink and overwrites the target. The fix adds
 // O_NOFOLLOW|O_EXCL so Write errors on a pre-existing symlink.

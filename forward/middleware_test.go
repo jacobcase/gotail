@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/forward"
+	"github.com/jacobcase/gotail/v3/forward"
 )
 
 func TestWithSinkTimeout_CancelsSlowSend(t *testing.T) {

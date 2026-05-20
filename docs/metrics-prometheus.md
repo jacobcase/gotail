@@ -12,8 +12,8 @@ import (
 
     "github.com/prometheus/client_golang/prometheus"
     "github.com/prometheus/client_golang/prometheus/promauto"
-    "github.com/jacobcase/gotail/v2/tail"
-    "github.com/jacobcase/gotail/v2/forward"
+    "github.com/jacobcase/gotail/v3/tail"
+    "github.com/jacobcase/gotail/v3/forward"
 )
 
 var (

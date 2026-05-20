@@ -1,6 +1,6 @@
 // Package watch provides L1 primitives for tailing a file across rotation.
 //
-// Most callers want the higher-level [github.com/jacobcase/gotail/v2/tail]
+// Most callers want the higher-level [github.com/jacobcase/gotail/v3/tail]
 // package, which adds checkpoint persistence, multi-file source enumeration,
 // and lifecycle hooks on top of these primitives. Use watch directly only
 // when you need a single-file watcher without those facilities.

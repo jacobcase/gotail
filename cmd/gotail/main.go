@@ -1,4 +1,4 @@
-// gotail tails a file and writes lines to stdout, similar to `tail -f`.
+// Command gotail tails a file and writes lines to stdout, similar to `tail -f`.
 // It uses the gotail v2 watch and tail packages.
 //
 // Usage:
@@ -21,7 +21,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jacobcase/gotail/v2/tail"
+	"github.com/jacobcase/gotail/v3/tail"
 )
 
 func main() {

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacobcase/gotail/v2/tail"
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/tail"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 func newFileCursor(t *testing.T, opts ...tail.FileCursorOption) (tail.Cursor, string) {
@@ -307,13 +307,13 @@ func TestFileCursor_Flock_CrossProcess(t *testing.T) {
 	testFlockCrossProcess(t)
 }
 
-// TestFileCursor_Flock_SymlinkFollow (ID-2): flock open must not follow a
+// TestFileCursor_Flock_SymlinkFollow: flock open must not follow a
 // pre-positioned symlink at lockPath.
 func TestFileCursor_Flock_SymlinkFollow(t *testing.T) {
 	testFlockSymlinkFollow(t)
 }
 
-// TestFileCursor_Flock_SameAsCursorPath (SE-2): using the cursor path as the
+// TestFileCursor_Flock_SameAsCursorPath: using the cursor path as the
 // flock path silently breaks mutual exclusion after the first Save (the atomic
 // rename orphans the held fd). NewFileCursor must reject this configuration.
 func TestFileCursor_Flock_SameAsCursorPath(t *testing.T) {
@@ -326,7 +326,7 @@ func TestFileCursor_Flock_SameAsCursorPath(t *testing.T) {
 	}
 }
 
-// TestWithFileMode_RejectsUnsafeModes (SE-8): WithFileMode must reject modes
+// TestWithFileMode_RejectsUnsafeModes: WithFileMode must reject modes
 // that have group-write, world-write, or special (setuid/setgid/sticky) bits.
 func TestWithFileMode_RejectsUnsafeModes(t *testing.T) {
 	dir := t.TempDir()
@@ -353,7 +353,7 @@ func TestWithFileMode_RejectsUnsafeModes(t *testing.T) {
 	}
 }
 
-// TestFileCursor_SyncBackgroundIntervalWithoutMode (SE-10):
+// TestFileCursor_SyncBackgroundIntervalWithoutMode:
 // WithSyncBackgroundInterval is silently ignored when the sync mode is not
 // SyncBackground. NewFileCursor must return an error in that case so the
 // misconfiguration is caught at construction time.

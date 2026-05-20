@@ -1,8 +1,13 @@
 # gotail — Claude project notes
 
+## Before opening a PR
+
+Run `make check` and ensure it passes before opening or updating a PR.
+Keep it in sync with `.github/workflows/ci.yml`.
+
 ## Design plan
 
-The v2 design plan lives at `docs/v2-plan.md`. The plan is a snapshot of
+The v2 design plan lives at `docs/design.md`. The plan is a snapshot of
 the current desired design state — it describes what the code does now,
 not its history. When a change lands that alters a documented design
 choice, edit the relevant section in place; do not keep "previously X,
@@ -22,5 +27,5 @@ When running Trail of Bits security skills, write all findings reports to ./docs
 Each review starts with a **Conducted** date and (when closed) a
 **Closed** date in the header. New reviews go in the same directory
 following the same header convention. When a review's findings change
-the design described in `docs/v2-plan.md`, edit the plan in place to
+the design described in `docs/design.md`, edit the plan in place to
 match the new design.

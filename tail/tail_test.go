@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/tail"
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/tail"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 func tailCfg(path string) tail.Options {
@@ -135,8 +135,8 @@ func TestTailer_MissingCheckpoint_Fail(t *testing.T) {
 	}
 }
 
-// TestTailer_NoInodeCheck_PrefersCursorPath pins the §11.4 #1 fix: under
-// NoInodeCheck the tie-break prefers the file the cursor named over the
+// TestTailer_NoInodeCheck_PrefersCursorPath pins the NoInodeCheck resume
+// tie-break: under NoInodeCheck it prefers the file the cursor named over the
 // first-existing fallback. Without the fix, a multi-file source would
 // resume at the oldest file regardless of which file the cursor named —
 // silent rotation drift on filesystems with unstable inodes.
@@ -1137,6 +1137,65 @@ func TestRotation_SymlinkSwap(t *testing.T) {
 	if string(rec2.Line) != "from-b" {
 		t.Fatalf("want from-b after symlink swap, got %q", rec2.Line)
 	}
+	tr.Close()
+	// In-place rotation (new inode at the same path) must fire OnRotated;
+	// previously the hook only fired on inter-file advance in the Source
+	// enumeration.
+	if rotations != 1 {
+		t.Fatalf("want 1 OnRotated call after symlink swap, got %d", rotations)
+	}
+}
+
+// TestRotation_RenameCreate_FiresOnRotated pins SD-1: when the active file
+// is rotated in place (rename of the original + create at the same path),
+// the LineReader detects the new inode and the Tailer's OnRotated hook
+// must fire. Before the fix the hook never fired in this path.
+func TestRotation_RenameCreate_FiresOnRotated(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var rotations int
+	var lastTo tail.Position
+	opts := tail.Options{
+		Source:   tail.SingleFile(path),
+		Interval: 10 * time.Millisecond,
+		OnRotated: func(_, to tail.Position) {
+			rotations++
+			lastTo = to
+		},
+	}
+	tr := mustNew(t, opts)
+	defer tr.Close()
+
+	rec1 := nextLine(t, ctx, tr)
+	if string(rec1.Line) != "first" {
+		t.Fatalf("want first, got %q", rec1.Line)
+	}
+
+	// Rotate: rename original out, write new content at the original path.
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec2 := nextLine(t, ctx, tr)
+	if string(rec2.Line) != "second" {
+		t.Fatalf("want second after rotation, got %q", rec2.Line)
+	}
+	if rotations != 1 {
+		t.Fatalf("want 1 OnRotated call after in-place rotation, got %d", rotations)
+	}
+	if lastTo.Offset != 0 {
+		t.Fatalf("rotation to-position must reset offset to 0, got %d", lastTo.Offset)
+	}
 }
 
 // TestProperty_AllBytesYieldedExactlyOnce is a quick-check-style property test:
@@ -1663,7 +1722,7 @@ func (f *failingSaveCursor) Close() error { return nil }
 
 // ── Security / hardening regression tests ────────────────────────────────────
 
-// TestNew_RequireCursor_NilErrors (SE-7): when RequireCursor is set, New must
+// TestNew_RequireCursor_NilErrors: when RequireCursor is set, New must
 // return an error instead of silently disabling checkpointing.
 func TestNew_RequireCursor_NilErrors(t *testing.T) {
 	dir := t.TempDir()
@@ -1683,10 +1742,10 @@ func TestNew_RequireCursor_NilErrors(t *testing.T) {
 	}
 }
 
-// TestNew_FailOnInodeMismatch_DefaultEnabled (ID-3): the default behaviour
+// TestNew_InodeMismatch_FailsByDefault: the default behaviour
 // (AllowInodeMismatch=false) must fail-safe. With default Options an inode
 // swap must cause New to return an error wrapping ErrInodeMismatch.
-func TestNew_FailOnInodeMismatch_DefaultEnabled(t *testing.T) {
+func TestNew_InodeMismatch_FailsByDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
 	if err := os.WriteFile(path, []byte("line\n"), 0o644); err != nil {
@@ -1729,8 +1788,8 @@ func TestNew_FailOnInodeMismatch_DefaultEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Second tailer with default Options (FailOnInodeMismatch unset / false).
-	// Under the new fail-safe default this must error with ErrInodeMismatch.
+	// Second tailer with default Options (AllowInodeMismatch unset / false).
+	// The fail-safe default must error with ErrInodeMismatch.
 	_, err = tail.New(ctx, tail.Options{
 		Source:   tail.SingleFile(path),
 		Cursor:   cur,
@@ -1741,7 +1800,7 @@ func TestNew_FailOnInodeMismatch_DefaultEnabled(t *testing.T) {
 	}
 }
 
-// TestNew_RejectsNegativeInterval (SE-11): a negative Interval must be
+// TestNew_RejectsNegativeInterval: a negative Interval must be
 // rejected by New, not silently coerced to 1s.
 func TestNew_RejectsNegativeInterval(t *testing.T) {
 	dir := t.TempDir()
@@ -1759,7 +1818,7 @@ func TestNew_RejectsNegativeInterval(t *testing.T) {
 	}
 }
 
-// TestNew_RejectsSeekCurrent (SE-3): io.SeekCurrent is accepted by the
+// TestNew_RejectsSeekCurrent: io.SeekCurrent is accepted by the
 // validator but falls through to SeekStart semantics (full-file replay).
 // New must reject it explicitly so callers get a clear error.
 func TestNew_RejectsSeekCurrent(t *testing.T) {
