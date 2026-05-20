@@ -323,4 +323,3 @@ func BenchmarkTailer_Backfill_WithHooks(b *testing.B) {
 		}
 	})
 }
-

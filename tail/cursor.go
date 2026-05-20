@@ -100,8 +100,8 @@ type fileCursorOpts struct {
 	flockPath    string
 	migrate      CursorMigrator
 	syncMode     SyncMode
-	syncInterval time.Duration       // used only by SyncBackground; 0 = DefaultSyncBackgroundInterval
-	onSyncError  func(err error)     // optional; called when a background flush fails
+	syncInterval time.Duration   // used only by SyncBackground; 0 = DefaultSyncBackgroundInterval
+	onSyncError  func(err error) // optional; called when a background flush fails
 }
 
 // WithDirSync controls whether [FileCursor.Save] fsyncs the containing

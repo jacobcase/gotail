@@ -23,7 +23,7 @@ import (
 // Like pollWatcher, it owns no fd to the active file: the [LineReader]
 // holds the only fd; this watcher observes via os.Stat.
 type fsnotifyWatcher struct {
-	c      Config
+	c        Config
 	target   string // filepath.Clean(c.Path) — cached for per-event matching
 	logger   *slog.Logger
 	fw       *fsnotify.Watcher
