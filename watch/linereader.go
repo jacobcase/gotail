@@ -131,6 +131,17 @@ func (l *LineReader) Next(ctx context.Context) (line []byte, pos Position, err e
 
 		// ── Read from active source ──────────────────────────────────────────
 		if l.src != nil {
+			// Reset to the start of the buffer when fully drained, so the read
+			// targets the full buffer instead of a zero-length slice past tail.
+			// Without this, a buffer whose capacity is an exact multiple of the
+			// line length leaves head==tail==len(buf) after the final line in a
+			// fill is yielded; the next Read returns (0, nil) and the loop
+			// falls through to Watcher.Wait, dropping any file content past the
+			// boundary in StopAtEOF mode and blocking forever in live mode.
+			if l.head == l.tail {
+				l.head = 0
+				l.tail = 0
+			}
 			n, rerr := l.src.Read(l.buf[l.tail:])
 			if n > 0 {
 				l.tail += n

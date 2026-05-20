@@ -262,3 +262,67 @@ func TestLineReader_LongLineNoNewline(t *testing.T) {
 		t.Fatalf("after skipToNewline, want 'ok', got %q", got)
 	}
 }
+
+// TestLineReader_AdvancesPastFullyConsumedBuffer pins the invariant that
+// the LineReader continues to yield lines after the buffer has been
+// drained at the exact buffer-end boundary.
+//
+// Regression: with a line size that evenly divides BufferSize, one Read
+// fills the buffer with N complete lines and leaves no partial line at
+// the tail. After consuming all N, head == tail == len(buf). The next
+// Read(l.buf[tail:]) targets a zero-length slice, returns (0, nil), and
+// the read-loop falls through to Watcher.Wait — which in StopAtEOF mode
+// returns io.EOF, causing the LineReader to silently drop any file
+// content past the buffer boundary.
+func TestLineReader_AdvancesPastFullyConsumedBuffer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aligned.log")
+
+	// 256-byte buffer / 32-byte lines = 8 lines fit exactly with no
+	// partial line at the boundary. Write 8 (aligned-fill) + 5 more
+	// (past the boundary) and expect all 13 to be yielded.
+	const (
+		bufferSize  = 256
+		lineSize    = 32
+		firstBatch  = bufferSize / lineSize // 8
+		secondBatch = 5
+		total       = firstBatch + secondBatch
+	)
+
+	line := bytes.Repeat([]byte{'a'}, lineSize-1)
+	line = append(line, '\n')
+
+	var content bytes.Buffer
+	for range total {
+		content.Write(line)
+	}
+	if err := os.WriteFile(path, content.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := watch.Config{Path: path, Interval: 10 * time.Millisecond, StopAtEOF: true}
+	w, err := watch.NewPolling(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lr := newLR(t, w, watch.LineOptions{BufferSize: bufferSize})
+
+	count := 0
+	for {
+		_, _, err := lr.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next after %d lines: %v", count, err)
+		}
+		count++
+	}
+
+	if count != total {
+		t.Fatalf("yielded %d lines, want %d (LineReader stopped at the aligned buffer boundary)", count, total)
+	}
+}
