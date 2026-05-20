@@ -24,9 +24,10 @@ import (
 // holds the only fd; this watcher observes via os.Stat.
 type fsnotifyWatcher struct {
 	c      Config
-	target string // filepath.Clean(c.Path) — cached for per-event matching
-	logger *slog.Logger
-	fw     *fsnotify.Watcher
+	target   string // filepath.Clean(c.Path) — cached for per-event matching
+	logger   *slog.Logger
+	fw       *fsnotify.Watcher
+	shutdown <-chan struct{} // closed by the owner to interrupt a blocking Wait
 
 	resume *Position
 	whence int
@@ -63,12 +64,13 @@ func NewFsnotify(c Config) (Watcher, error) {
 		return nil, fmt.Errorf("watch: watch dir %s: %w", dir, err)
 	}
 	return &fsnotifyWatcher{
-		c:      c,
-		target: filepath.Clean(c.Path),
-		logger: lg,
-		fw:     fw,
-		resume: c.Resume,
-		whence: c.Whence,
+		c:        c,
+		target:   filepath.Clean(c.Path),
+		logger:   lg,
+		fw:       fw,
+		shutdown: c.Shutdown,
+		resume:   c.Resume,
+		whence:   c.Whence,
 	}, nil
 }
 
@@ -76,7 +78,7 @@ func NewFsnotify(c Config) (Watcher, error) {
 // OS event wait, giving sub-millisecond latency on supported platforms.
 func (w *fsnotifyWatcher) Wait(ctx context.Context) (Event, error) {
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := w.stopErr(ctx); err != nil {
 			return Event{}, err
 		}
 
@@ -207,6 +209,8 @@ func (w *fsnotifyWatcher) fsnWait(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-w.shutdown:
+			return ErrWatcherClosed
 		case ev, ok := <-w.fw.Events:
 			if !ok {
 				return ErrWatcherClosed
@@ -220,6 +224,21 @@ func (w *fsnotifyWatcher) fsnWait(ctx context.Context) error {
 			}
 			w.logger.Warn("watch: fsnotify error", "err", err, "path", w.c.Path)
 		}
+	}
+}
+
+// stopErr reports a non-nil error if ctx is cancelled or the owner has closed
+// Shutdown, letting Wait bail out between stat phases rather than only inside
+// fsnWait.
+func (w *fsnotifyWatcher) stopErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-w.shutdown:
+		return ErrWatcherClosed
+	default:
+		return nil
 	}
 }
 

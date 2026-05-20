@@ -80,6 +80,12 @@ type Config struct {
 	// Optional and nil-safe. Fires before AllowInodeMismatch is honoured,
 	// so observers see the mismatch even when the watcher decides to fail.
 	OnInodeMismatch func(want, got uint64)
+	// Shutdown, if non-nil, makes a blocking [Watcher.Wait] return
+	// [ErrWatcherClosed] when the channel is closed. It lets an owner
+	// interrupt a live-tail Wait without cancelling the per-call ctx — e.g.
+	// [Tailer] closes it from Close to unblock Wait while leaving the caller's
+	// own ctx semantics untouched. Optional; a nil channel never fires.
+	Shutdown <-chan struct{}
 }
 
 // New returns a Watcher. It attempts NewFsnotify first; if that returns

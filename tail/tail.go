@@ -149,8 +149,8 @@ type Tailer struct {
 	files  []string     // enumerated at construction; oldest-first snapshot
 
 	// lr is single-writer: written by New and by advance (which only runs
-	// inside Next). Close reads it only after activeNext.Wait() has parked
-	// the Next goroutine, so no lock is required around access.
+	// inside Next). Close reads it only after acquiring runMu for write, which
+	// waits out the in-flight Next, so no lock is required around access here.
 	lr *watch.LineReader
 
 	fileIdx    int  // index of the currently-watched file in t.files
@@ -168,14 +168,20 @@ type Tailer struct {
 	done     chan struct{}
 	doneOnce sync.Once
 
-	// closeCtx is cancelled by Close. It is wired into the per-call ctx of
-	// Next via context.AfterFunc so that Close interrupts any blocking
-	// LineReader.Next, allowing Close to await in-flight Next calls before
-	// touching lr (which is not safe for concurrent use).
-	closeCtx    context.Context
-	closeCancel context.CancelFunc
-	activeNext  sync.WaitGroup
-	closeOnce   sync.Once
+	// closeCh is closed by Close and handed to each Watcher via
+	// watch.Config.Shutdown, so closing it unblocks a live-tail Watcher.Wait
+	// (and thus LineReader.Next) without touching the caller's per-call ctx.
+	//
+	// runMu coordinates teardown against an in-flight Next without a per-call
+	// allocation: Next holds it for read across the whole call; Close closes
+	// closeCh (unblocking the Wait) and then takes it for write, so lr.Close —
+	// which is not safe for concurrent use with lr.Next — runs only after the
+	// in-flight Next has returned. The read-unlock → write-lock transition is
+	// the happens-before edge between Next and teardown. closeOnce makes the
+	// close idempotent.
+	closeCh   chan struct{}
+	runMu     sync.RWMutex
+	closeOnce sync.Once
 }
 
 // New constructs a Tailer. opts.Source must be non-nil.
@@ -287,17 +293,15 @@ func New(ctx context.Context, opts Options) (_ *Tailer, returnErr error) {
 		}
 	}
 
-	closeCtx, closeCancel := context.WithCancel(context.Background())
 	t := &Tailer{
-		opts:        opts,
-		logger:      lg,
-		files:       files,
-		fileIdx:     startIdx,
-		atActive:    startIdx == len(files)-1,
-		lastMeta:    lastMeta,
-		done:        make(chan struct{}),
-		closeCtx:    closeCtx,
-		closeCancel: closeCancel,
+		opts:     opts,
+		logger:   lg,
+		files:    files,
+		fileIdx:  startIdx,
+		atActive: startIdx == len(files)-1,
+		lastMeta: lastMeta,
+		done:     make(chan struct{}),
+		closeCh:  make(chan struct{}),
 	}
 
 	if err := t.openFile(files[startIdx], resumePos); err != nil {
@@ -328,6 +332,7 @@ func (t *Tailer) openFile(path string, resume *watch.Position) error {
 		AllowInodeMismatch: t.opts.AllowInodeMismatch,
 		OnInodeMismatch:    t.opts.OnInodeMismatch,
 		Logger:             t.logger,
+		Shutdown:           t.closeCh,
 	}
 	var w watch.Watcher
 	var err error
@@ -459,26 +464,23 @@ func (t *Tailer) Records(ctx context.Context) iter.Seq2[Record, error] {
 // Next returns the next line. It blocks until a line is available, the context
 // is cancelled, or (in StopAtEOF mode) the file series is exhausted.
 //
-// When [Tailer.Close] is called concurrently, the internal closeCtx is wired
-// into Next's ctx via context.AfterFunc so a blocking LineReader.Next returns
-// promptly. Close waits for all in-flight Next calls before tearing down lr.
+// When [Tailer.Close] is called concurrently, it closes closeCh — handed to
+// the Watcher as Shutdown — so a blocking LineReader.Next returns promptly.
+// Close then waits for all in-flight Next calls before tearing down lr. The
+// caller's ctx is passed straight through, so Close interruption and caller
+// cancellation are independent signals.
 func (t *Tailer) Next(ctx context.Context) (Record, error) {
-	t.activeNext.Add(1)
-	defer t.activeNext.Done()
+	t.runMu.RLock()
+	defer t.runMu.RUnlock()
 
-	if err := t.closeCtx.Err(); err != nil {
+	if t.closing() {
 		return Record{}, ErrSourceExhausted
 	}
 
-	callCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	stop := context.AfterFunc(t.closeCtx, cancel)
-	defer stop()
-
 	for {
-		line, pos, err := t.lr.Next(callCtx)
+		line, pos, err := t.lr.Next(ctx)
 		if err != nil {
-			if t.closeCtx.Err() != nil {
+			if t.closing() {
 				// Close is in progress; surface as exhaustion rather than ctx.Err.
 				return Record{}, ErrSourceExhausted
 			}
@@ -489,7 +491,7 @@ func (t *Tailer) Next(ctx context.Context) (Record, error) {
 					return Record{}, ErrSourceExhausted
 				}
 				// Backup file exhausted — advance to the next file.
-				if aerr := t.advance(callCtx); aerr != nil {
+				if aerr := t.advance(ctx); aerr != nil {
 					return Record{}, aerr
 				}
 				continue
@@ -509,6 +511,17 @@ func (t *Tailer) Next(ctx context.Context) (Record, error) {
 		t.stats.bytesRead.Add(int64(len(line)) + 1) // +1 for the newline
 
 		return Record{Line: line, Pos: pos}, nil
+	}
+}
+
+// closing reports whether Close has been called. Cheap and lock-free: a
+// non-blocking receive on closeCh, which Close closes exactly once.
+func (t *Tailer) closing() bool {
+	select {
+	case <-t.closeCh:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -601,8 +614,9 @@ func (t *Tailer) Stats() Stats {
 func (t *Tailer) CloseWithFlush(ctx context.Context) error {
 	var saveErr error
 	t.closeOnce.Do(func() {
-		t.closeCancel()
-		t.activeNext.Wait()
+		close(t.closeCh)
+		t.runMu.Lock()
+		defer t.runMu.Unlock()
 
 		// Persist current position if a cursor is configured and we have a
 		// non-zero position to commit.
@@ -659,14 +673,15 @@ func (t *Tailer) Done() <-chan struct{} {
 // to call from any goroutine. Any pending uncommitted line is discarded;
 // commit before closing if needed.
 //
-// Close cancels the internal closeCtx and blocks until all in-flight Next
-// calls have returned, so that LineReader.Close — which is not safe for
-// concurrent use with Next — runs without a race.
+// Close closes the internal closeCh (the Watcher's Shutdown signal) and blocks
+// until all in-flight Next calls have returned, so that LineReader.Close —
+// which is not safe for concurrent use with Next — runs without a race.
 func (t *Tailer) Close() error {
 	var rerr error
 	t.closeOnce.Do(func() {
-		t.closeCancel()
-		t.activeNext.Wait()
+		close(t.closeCh)
+		t.runMu.Lock()
+		defer t.runMu.Unlock()
 
 		if t.lr != nil {
 			rerr = t.lr.Close()

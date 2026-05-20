@@ -46,7 +46,8 @@ type LineOptions struct {
 // LineReader is not safe for concurrent use, including Close. To stop a
 // blocked Next from another goroutine, cancel the ctx passed to Next; once
 // Next has returned, Close may run on the same goroutine. [Tailer] coordinates
-// this internally via context.AfterFunc and a WaitGroup.
+// this internally by closing the Watcher's Shutdown channel and serializing
+// teardown against the in-flight Next with an RWMutex.
 type LineReader struct {
 	w    Watcher
 	opts LineOptions
