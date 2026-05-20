@@ -902,7 +902,7 @@ func TestForwarder_BackoffJitter_OutOfRange(t *testing.T) {
 
 // doneClosableSource is a RecordSource whose Done() channel can be closed
 // externally. Next keeps returning records indefinitely until ctx cancels —
-// exactly the case the §11.4 #7 fix targets.
+// exactly the Source.Done() exit case the §4 L3 Run docstring covers.
 type doneClosableSource struct {
 	done chan struct{}
 }
@@ -918,7 +918,7 @@ func (s *doneClosableSource) Next(ctx context.Context) (tail.Record, error) {
 func (s *doneClosableSource) Commit(_ context.Context, _ forward.Position) error { return nil }
 func (s *doneClosableSource) Done() <-chan struct{}                              { return s.done }
 
-// TestForwarder_HonoursSourceDone pins §11.4 #7 / §4 L3 Run docstring:
+// TestForwarder_HonoursSourceDone pins the §4 L3 Run docstring:
 // when Source.Done() closes, Run must exit cleanly even if Next keeps
 // returning records.
 func TestForwarder_HonoursSourceDone(t *testing.T) {
@@ -946,9 +946,10 @@ func TestForwarder_HonoursSourceDone(t *testing.T) {
 	}
 }
 
-// TestForwarder_OnBatchSent_FullSignature pins the §11.1 #1 fix: the hook
-// receives records, bytes, pos, and latency — the four pieces of info plan
-// §4 L3 promised plus the position the implementation found useful.
+// TestForwarder_OnBatchSent_FullSignature pins the OnBatchSent signature
+// (§4 L3, §5.5): the hook receives records, bytes, pos, and latency — the
+// four pieces of info §4 L3 promised plus the position the implementation
+// found useful.
 // Latency reflects the successful Sink.Send call duration only (excludes
 // batch fill time and failed retries).
 func TestForwarder_OnBatchSent_FullSignature(t *testing.T) {

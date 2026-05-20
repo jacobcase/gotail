@@ -135,8 +135,8 @@ func TestTailer_MissingCheckpoint_Fail(t *testing.T) {
 	}
 }
 
-// TestTailer_NoInodeCheck_PrefersCursorPath pins the §11.4 #1 fix: under
-// NoInodeCheck the tie-break prefers the file the cursor named over the
+// TestTailer_NoInodeCheck_PrefersCursorPath pins the NoInodeCheck resume
+// tie-break: under NoInodeCheck it prefers the file the cursor named over the
 // first-existing fallback. Without the fix, a multi-file source would
 // resume at the oldest file regardless of which file the cursor named —
 // silent rotation drift on filesystems with unstable inodes.
