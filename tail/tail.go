@@ -144,8 +144,9 @@ type tailerStats struct {
 // Tailer is not safe for concurrent use by multiple goroutines; however,
 // Close and Position may be called from any goroutine.
 type Tailer struct {
-	opts  Options
-	files []string // enumerated at construction; oldest-first snapshot
+	opts   Options
+	logger *slog.Logger // resolved once in New (defaults to slog.Default when opts.Logger is nil)
+	files  []string     // enumerated at construction; oldest-first snapshot
 
 	// lr is single-writer: written by New and by advance (which only runs
 	// inside Next). Close reads it only after activeNext.Wait() has parked
@@ -206,7 +207,7 @@ func New(ctx context.Context, opts Options) (_ *Tailer, returnErr error) {
 	if opts.SkipExisting && opts.Whence != 0 {
 		return nil, errors.New("tail: SkipExisting and Whence are mutually exclusive")
 	}
-	// SE-3: io.SeekCurrent has no defined semantics here (no resume point to
+	// io.SeekCurrent has no defined semantics here (no resume point to
 	// seek relative to) and silently falls through to SeekStart in the
 	// watcher. Reject it explicitly so callers see the gap immediately.
 	if opts.Whence != 0 && opts.Whence != io.SeekStart && opts.Whence != io.SeekEnd {
@@ -215,7 +216,7 @@ func New(ctx context.Context, opts Options) (_ *Tailer, returnErr error) {
 	if opts.SkipExisting {
 		opts.Whence = io.SeekEnd
 	}
-	// SE-11: negative Interval was silently coerced to 1s; reject it so
+	// negative Interval was silently coerced to 1s; reject it so
 	// YAML-mapper bugs (e.g. unset duration → -1) don't get a default.
 	if opts.Interval < 0 {
 		return nil, fmt.Errorf("tail: Options.Interval must not be negative, got %v", opts.Interval)
@@ -289,6 +290,7 @@ func New(ctx context.Context, opts Options) (_ *Tailer, returnErr error) {
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	t := &Tailer{
 		opts:        opts,
+		logger:      lg,
 		files:       files,
 		fileIdx:     startIdx,
 		atActive:    startIdx == len(files)-1,
@@ -298,7 +300,7 @@ func New(ctx context.Context, opts Options) (_ *Tailer, returnErr error) {
 		closeCancel: closeCancel,
 	}
 
-	if err := t.openFile(files[startIdx], resumePos, lg); err != nil {
+	if err := t.openFile(files[startIdx], resumePos); err != nil {
 		return nil, err
 	}
 	return t, nil
@@ -306,7 +308,7 @@ func New(ctx context.Context, opts Options) (_ *Tailer, returnErr error) {
 
 // openFile creates a new watcher+linereader for the file at path.
 // isBackup files use StopAtEOF=true so the watcher signals exhaustion.
-func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) error {
+func (t *Tailer) openFile(path string, resume *watch.Position) error {
 	isActive := t.fileIdx == len(t.files)-1
 	// Whence is a one-shot initial-seek setting: it applies only on the first
 	// open (no resume cursor and the initial seek has not yet been consumed).
@@ -325,7 +327,7 @@ func (t *Tailer) openFile(path string, resume *watch.Position, lg *slog.Logger) 
 		NoInodeCheck:       t.opts.NoInodeCheck,
 		AllowInodeMismatch: t.opts.AllowInodeMismatch,
 		OnInodeMismatch:    t.opts.OnInodeMismatch,
-		Logger:             lg,
+		Logger:             t.logger,
 	}
 	var w watch.Watcher
 	var err error
@@ -421,7 +423,7 @@ func (t *Tailer) advance(ctx context.Context) error {
 	t.fileIdx = nextIdx
 	t.atActive = nextIdx == len(t.files)-1
 
-	if err := t.openFile(nextPath, nil, t.opts.Logger); err != nil {
+	if err := t.openFile(nextPath, nil); err != nil {
 		return err
 	}
 

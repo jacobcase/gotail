@@ -55,15 +55,14 @@ func (s *staticSource) Enumerate(ctx context.Context) ([]string, error) {
 type LumberjackOption func(*lumberjackSource)
 
 // WithLumberjackSkippedHook installs a callback that fires once per backup
-// file Lumberjack recognises but cannot expose to the tailer. The hook is
-// invoked synchronously from [Source.Enumerate]; it must not block.
+// file Lumberjack recognises but cannot expose to the tailer (today: the
+// recognised lumberjack-with-compression backup `<stem>-<timestamp><ext>.gz`,
+// which gotail does not decompress). The hook is invoked synchronously from
+// [Source.Enumerate]; it must not block.
 //
-// reason is a short tag identifying why the file was skipped:
-//   - "compressed": the file is a recognised lumberjack-with-compression
-//     backup (<stem>-<timestamp><ext>.gz). gotail does not decompress on
-//     read; the hook lets callers log, alert, or treat checkpoint resume
-//     against an aged-off backup as a hard error.
-func WithLumberjackSkippedHook(fn func(path, reason string)) LumberjackOption {
+// Callers typically use this to log, alert, or treat checkpoint resume
+// against an aged-off backup as a hard error.
+func WithLumberjackSkippedHook(fn func(path string)) LumberjackOption {
 	return func(s *lumberjackSource) { s.skipped = fn }
 }
 
@@ -88,7 +87,7 @@ func Lumberjack(activePath string, opts ...LumberjackOption) Source {
 
 type lumberjackSource struct {
 	activePath string
-	skipped    func(path, reason string) // optional
+	skipped    func(path string) // optional
 }
 
 func (s *lumberjackSource) Enumerate(ctx context.Context) ([]string, error) {
@@ -127,7 +126,7 @@ func (s *lumberjackSource) Enumerate(ctx context.Context) ([]string, error) {
 		// exists to surface.
 		if matchLumberjackCompressed(n, prefix, ext) {
 			if s.skipped != nil {
-				s.skipped(filepath.Join(dir, n), "compressed")
+				s.skipped(filepath.Join(dir, n))
 			}
 			continue
 		}
@@ -221,13 +220,11 @@ func (g *globSource) Enumerate(ctx context.Context) ([]string, error) {
 type LogrotateOption func(*logrotateSource)
 
 // WithLogrotateSkippedHook installs a callback that fires once per backup
-// file Logrotate recognises but cannot expose to the tailer. The hook is
-// invoked synchronously from [Source.Enumerate]; it must not block.
-//
-// reason is a short tag identifying why the file was skipped:
-//   - "compressed": the file is a compressed logrotate backup
-//     (<active>.<N>.gz). gotail does not decompress on read.
-func WithLogrotateSkippedHook(fn func(path, reason string)) LogrotateOption {
+// file Logrotate recognises but cannot expose to the tailer (today: the
+// compressed logrotate backup `<active>.<N>.gz`, which gotail does not
+// decompress). The hook is invoked synchronously from [Source.Enumerate];
+// it must not block.
+func WithLogrotateSkippedHook(fn func(path string)) LogrotateOption {
 	return func(s *logrotateSource) { s.skipped = fn }
 }
 
@@ -251,7 +248,7 @@ func Logrotate(activePath string, opts ...LogrotateOption) Source {
 
 type logrotateSource struct {
 	activePath string
-	skipped    func(path, reason string) // optional
+	skipped    func(path string) // optional
 }
 
 func (s *logrotateSource) Enumerate(ctx context.Context) ([]string, error) {
@@ -279,7 +276,7 @@ func (s *logrotateSource) Enumerate(ctx context.Context) ([]string, error) {
 		if compressed, ok := strings.CutSuffix(suffix, ".gz"); ok {
 			if _, err := strconv.Atoi(compressed); err == nil {
 				if s.skipped != nil {
-					s.skipped(p, "compressed")
+					s.skipped(p)
 				}
 			}
 			continue

@@ -72,8 +72,8 @@ func acquireFlock(path string) (*flock, error) {
 	)
 	if r == 0 {
 		f.Close()
-		if e == errLockViolation {
-			return nil, ErrLockHeld
+		if errors.Is(e, errLockViolation) {
+			return nil, fmt.Errorf("tail: lock held on %s: %w", path, ErrLockHeld)
 		}
 		return nil, fmt.Errorf("tail: LockFileEx %s: %w", path, e)
 	}

@@ -3,6 +3,7 @@
 package tail_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,7 +27,7 @@ func testFlockConflict(t *testing.T) {
 
 	c2Path := filepath.Join(dir, "test2.cursor")
 	_, err = tail.NewFileCursor(c2Path, tail.WithFlock(lockPath))
-	if err != tail.ErrLockHeld {
+	if !errors.Is(err, tail.ErrLockHeld) {
 		t.Fatalf("want ErrLockHeld, got %v", err)
 	}
 }

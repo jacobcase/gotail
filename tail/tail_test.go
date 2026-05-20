@@ -1722,7 +1722,7 @@ func (f *failingSaveCursor) Close() error { return nil }
 
 // ── Security / hardening regression tests ────────────────────────────────────
 
-// TestNew_RequireCursor_NilErrors (SE-7): when RequireCursor is set, New must
+// TestNew_RequireCursor_NilErrors: when RequireCursor is set, New must
 // return an error instead of silently disabling checkpointing.
 func TestNew_RequireCursor_NilErrors(t *testing.T) {
 	dir := t.TempDir()
@@ -1800,7 +1800,7 @@ func TestNew_InodeMismatch_FailsByDefault(t *testing.T) {
 	}
 }
 
-// TestNew_RejectsNegativeInterval (SE-11): a negative Interval must be
+// TestNew_RejectsNegativeInterval: a negative Interval must be
 // rejected by New, not silently coerced to 1s.
 func TestNew_RejectsNegativeInterval(t *testing.T) {
 	dir := t.TempDir()
@@ -1818,7 +1818,7 @@ func TestNew_RejectsNegativeInterval(t *testing.T) {
 	}
 }
 
-// TestNew_RejectsSeekCurrent (SE-3): io.SeekCurrent is accepted by the
+// TestNew_RejectsSeekCurrent: io.SeekCurrent is accepted by the
 // validator but falls through to SeekStart semantics (full-file replay).
 // New must reject it explicitly so callers get a clear error.
 func TestNew_RejectsSeekCurrent(t *testing.T) {

@@ -157,10 +157,7 @@ func TestLumberjackSource_CompressedBackupsSkipped(t *testing.T) {
 	touch(t, active)
 
 	var skipped []string
-	src := tail.Lumberjack(active, tail.WithLumberjackSkippedHook(func(path, reason string) {
-		if reason != "compressed" {
-			t.Errorf("unexpected reason %q for %q", reason, path)
-		}
+	src := tail.Lumberjack(active, tail.WithLumberjackSkippedHook(func(path string) {
 		skipped = append(skipped, filepath.Base(path))
 	}))
 	paths, err := src.Enumerate(context.Background())
@@ -274,10 +271,7 @@ func TestLogrotateSource_CompressedBackupsSkipped(t *testing.T) {
 	touch(t, filepath.Join(dir, "app.log.3.gz"))
 
 	var skipped []string
-	src := tail.Logrotate(active, tail.WithLogrotateSkippedHook(func(path, reason string) {
-		if reason != "compressed" {
-			t.Errorf("unexpected reason %q for %q", reason, path)
-		}
+	src := tail.Logrotate(active, tail.WithLogrotateSkippedHook(func(path string) {
 		skipped = append(skipped, filepath.Base(path))
 	}))
 	paths, err := src.Enumerate(context.Background())
@@ -305,7 +299,7 @@ func TestLogrotateSource_IgnoresJunk(t *testing.T) {
 	touch(t, filepath.Join(dir, "app.log.2.tmp")) // numeric but with extra suffix
 
 	hookFired := false
-	src := tail.Logrotate(active, tail.WithLogrotateSkippedHook(func(string, string) {
+	src := tail.Logrotate(active, tail.WithLogrotateSkippedHook(func(string) {
 		hookFired = true
 	}))
 	paths, err := src.Enumerate(context.Background())

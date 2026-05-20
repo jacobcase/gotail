@@ -100,7 +100,8 @@ type fileCursorOpts struct {
 	flockPath    string
 	migrate      CursorMigrator
 	syncMode     SyncMode
-	syncInterval time.Duration // used only by SyncBackground; 0 = DefaultSyncBackgroundInterval
+	syncInterval time.Duration       // used only by SyncBackground; 0 = DefaultSyncBackgroundInterval
+	onSyncError  func(err error)     // optional; called when a background flush fails
 }
 
 // WithDirSync controls whether [FileCursor.Save] fsyncs the containing
@@ -150,6 +151,21 @@ func WithSyncBackgroundInterval(d time.Duration) FileCursorOption {
 	return func(o *fileCursorOpts) { o.syncInterval = d }
 }
 
+// WithOnSyncError installs a callback that fires when the [SyncBackground]
+// flusher's periodic flush (or the final flush during [Cursor.Close]) fails
+// to write to disk. Without this hook the failure is silent — the caller
+// keeps Save'ing into memory while no checkpoint actually reaches disk.
+//
+// The callback is invoked synchronously from the background goroutine and
+// must not block; offload anything expensive to a feed channel or a
+// dedicated goroutine.
+//
+// Has no effect under [SyncAlways] (Save's error is returned directly to the
+// caller) or [SyncOnCommit] (the caller drives Sync and observes its error).
+func WithOnSyncError(fn func(err error)) FileCursorOption {
+	return func(o *fileCursorOpts) { o.onSyncError = fn }
+}
+
 // cursorFile is the on-disk JSON format.
 type cursorFile struct {
 	Pos     Position        `json:"pos"`
@@ -197,19 +213,19 @@ func NewFileCursor(path string, opts ...FileCursorOption) (Cursor, error) {
 	for _, fn := range opts {
 		fn(&o)
 	}
-	// SE-8: WithFileMode must not accept group/world-writable or special
+	// WithFileMode must not accept group/world-writable or special
 	// (setuid/setgid/sticky) bits. The default 0o600 is the primary control;
 	// validation here keeps the option from defeating it.
 	if o.fileMode&0o022 != 0 || o.fileMode&^os.FileMode(0o777) != 0 {
 		return nil, fmt.Errorf("tail: WithFileMode(%04o) is unsafe: must not have group/world-write or special bits", o.fileMode)
 	}
-	// SE-2: flockPath must differ from the cursor path; otherwise the
+	// flockPath must differ from the cursor path; otherwise the
 	// rename-over-open in atomicwrite.Write orphans the held flock fd on
 	// the first Save and silently breaks mutual exclusion.
 	if o.flockPath != "" && filepath.Clean(o.flockPath) == filepath.Clean(path) {
 		return nil, fmt.Errorf("tail: WithFlock path %q must differ from cursor path %q (rename-over-open would orphan the lock)", o.flockPath, path)
 	}
-	// SE-10: WithSyncBackgroundInterval is only meaningful for SyncBackground
+	// WithSyncBackgroundInterval is only meaningful for SyncBackground
 	// mode; reject the misconfiguration so the dead-config is caught at
 	// construction time rather than silently ignored.
 	if o.syncInterval != 0 && o.syncMode != SyncBackground {
@@ -244,15 +260,23 @@ func (c *FileCursor) backgroundFlusher(interval time.Duration) {
 	for {
 		select {
 		case <-ticker.C:
-			_ = c.Sync(context.Background())
+			if err := c.Sync(context.Background()); err != nil && c.opts.onSyncError != nil {
+				c.opts.onSyncError(err)
+			}
 		case <-c.stopBg:
 			// Final flush before exit.
-			_ = c.Sync(context.Background())
+			if err := c.Sync(context.Background()); err != nil && c.opts.onSyncError != nil {
+				c.opts.onSyncError(err)
+			}
 			return
 		}
 	}
 }
 
+// Load implements [Cursor.Load]. It reads and parses the on-disk cursor file
+// at the path passed to [NewFileCursor]. The bool is false (with nil error)
+// when the file does not exist; the bool is true after a successful parse or
+// after a migration via [WithCursorMigration].
 func (c *FileCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return Checkpoint{}, false, err
@@ -286,8 +310,12 @@ func (c *FileCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
 				"tail: cursor %s migration from version %d failed: %w: %w",
 				c.path, cf.Version, merr, ErrUnsupportedCursorVersion)
 		}
-		// Persist the migrated checkpoint so subsequent loads skip the migrator.
-		if werr := c.Save(ctx, migrated); werr != nil {
+		// Persist the migrated checkpoint so subsequent loads skip the
+		// migrator. Bypass Save's sync-mode buffering and flush directly:
+		// migration is a durability-critical write, and leaving it pending
+		// would cost the caller a re-migration on the next start if the
+		// process crashes before the buffer flushes.
+		if werr := c.flush(migrated); werr != nil {
 			return Checkpoint{}, false, fmt.Errorf("tail: cursor %s migration save: %w", c.path, werr)
 		}
 		return migrated, true, nil
@@ -295,6 +323,10 @@ func (c *FileCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
 	return Checkpoint{Pos: cf.Pos, Meta: cf.Meta}, true, nil
 }
 
+// Save implements [Cursor.Save]. Under [SyncAlways] (the default) it writes
+// the cursor atomically and fsyncs before returning; under [SyncOnCommit]
+// and [SyncBackground] it buffers the checkpoint in memory and the caller
+// (or the background flusher) drives the flush via [FileCursor.Sync].
 func (c *FileCursor) Save(ctx context.Context, cp Checkpoint) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -343,6 +375,9 @@ func (c *FileCursor) Sync(ctx context.Context) error {
 	return c.flush(cp)
 }
 
+// Close implements [Cursor.Close]. It stops the background flusher (if
+// configured), releases the flock (if [WithFlock] was set), and is idempotent
+// across repeated calls.
 func (c *FileCursor) Close() error {
 	// Stop the background flusher goroutine if running.
 	if c.stopBg != nil {
@@ -374,7 +409,11 @@ func (m *memoryCursor) Load(ctx context.Context) (Checkpoint, bool, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.cp, m.have, nil
+	// Defensive copy of Meta so caller mutation of the returned slice cannot
+	// corrupt the stored state. *FileCursor is immune because it round-trips
+	// through json.Marshal; this matches that behaviour for tests that swap
+	// MemoryCursor in for FileCursor.
+	return Checkpoint{Pos: m.cp.Pos, Meta: cloneRawMessage(m.cp.Meta)}, m.have, nil
 }
 
 func (m *memoryCursor) Save(ctx context.Context, cp Checkpoint) error {
@@ -383,9 +422,18 @@ func (m *memoryCursor) Save(ctx context.Context, cp Checkpoint) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.cp = cp
+	m.cp = Checkpoint{Pos: cp.Pos, Meta: cloneRawMessage(cp.Meta)}
 	m.have = true
 	return nil
+}
+
+func cloneRawMessage(m json.RawMessage) json.RawMessage {
+	if m == nil {
+		return nil
+	}
+	out := make(json.RawMessage, len(m))
+	copy(out, m)
+	return out
 }
 
 func (m *memoryCursor) Close() error { return nil }

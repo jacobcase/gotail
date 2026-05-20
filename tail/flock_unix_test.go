@@ -32,7 +32,7 @@ func testFlockConflict(t *testing.T) {
 	// Second cursor on the same lock must fail.
 	c2Path := filepath.Join(dir, "test2.cursor")
 	_, err = tail.NewFileCursor(c2Path, tail.WithFlock(lockPath))
-	if err != tail.ErrLockHeld {
+	if !errors.Is(err, tail.ErrLockHeld) {
 		t.Fatalf("want ErrLockHeld, got %v", err)
 	}
 }
@@ -168,7 +168,7 @@ func testFlockCrossProcess(t *testing.T) {
 	}
 }
 
-// testFlockSymlinkFollow (ID-2): acquireFlock must not follow a pre-positioned
+// testFlockSymlinkFollow: acquireFlock must not follow a pre-positioned
 // symlink at lockPath. Currently os.OpenFile uses no O_NOFOLLOW, so it opens
 // through the symlink and truncates the target. The fix adds O_NOFOLLOW.
 func testFlockSymlinkFollow(t *testing.T) {

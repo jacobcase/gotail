@@ -26,7 +26,7 @@ func acquireFlock(path string) (*flock, error) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, ErrLockHeld
+			return nil, fmt.Errorf("tail: lock held on %s: %w", path, ErrLockHeld)
 		}
 		return nil, fmt.Errorf("tail: flock %s: %w", path, err)
 	}
