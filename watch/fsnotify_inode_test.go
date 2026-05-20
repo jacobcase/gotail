@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 // These three tests mirror the polling-watcher inode-mismatch contracts

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 // TestStatInode_NonZero asserts that a freshly created file produces a

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 // scriptedWatcher returns a fixed sequence of events from Wait, then io.EOF.

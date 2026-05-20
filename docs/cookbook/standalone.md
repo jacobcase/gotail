@@ -20,7 +20,7 @@ import (
     "syscall"
     "time"
 
-    "github.com/jacobcase/gotail/v2/watch"
+    "github.com/jacobcase/gotail/v3/watch"
 )
 
 func main() {

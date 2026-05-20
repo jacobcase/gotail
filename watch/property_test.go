@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 // maxPropInput bounds fuzz input size so each iteration stays fast (the driver

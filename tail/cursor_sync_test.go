@@ -9,8 +9,8 @@ import (
 
 	"go.uber.org/goleak"
 
-	"github.com/jacobcase/gotail/v2/tail"
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/tail"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 // TestFileCursor_SyncAlways_FlushesEveryCall verifies that each Save produces

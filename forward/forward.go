@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/tail"
+	"github.com/jacobcase/gotail/v3/tail"
 )
 
 // Position is an alias for [tail.Position] so external implementations of

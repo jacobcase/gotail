@@ -13,7 +13,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/jacobcase/gotail/v2/forward"
+	"github.com/jacobcase/gotail/v3/forward"
 )
 
 // RecordingSink captures every batch delivered to it.

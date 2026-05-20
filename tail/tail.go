@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 // Position is an alias for [watch.Position] so L2 callers do not need to

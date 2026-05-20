@@ -6,8 +6,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/jacobcase/gotail/v2/watch"
-	"github.com/jacobcase/gotail/v2/watchtest"
+	"github.com/jacobcase/gotail/v3/watch"
+	"github.com/jacobcase/gotail/v3/watchtest"
 )
 
 func TestFakeWatcher_FirstWaitReturnsReOpened(t *testing.T) {

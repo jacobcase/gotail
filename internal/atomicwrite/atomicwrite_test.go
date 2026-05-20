@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/jacobcase/gotail/v2/internal/atomicwrite"
+	"github.com/jacobcase/gotail/v3/internal/atomicwrite"
 )
 
 func TestWrite_CreatesFile(t *testing.T) {

@@ -13,8 +13,8 @@ import (
 
     "go.opentelemetry.io/otel"
     "go.opentelemetry.io/otel/metric"
-    "github.com/jacobcase/gotail/v2/tail"
-    "github.com/jacobcase/gotail/v2/forward"
+    "github.com/jacobcase/gotail/v3/tail"
+    "github.com/jacobcase/gotail/v3/forward"
 )
 
 type Metrics struct {

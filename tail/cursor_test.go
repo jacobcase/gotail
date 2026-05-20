@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacobcase/gotail/v2/tail"
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/tail"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 func newFileCursor(t *testing.T, opts ...tail.FileCursorOption) (tail.Cursor, string) {

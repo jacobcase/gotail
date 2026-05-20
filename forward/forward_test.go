@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/forward"
-	"github.com/jacobcase/gotail/v2/forwardtest"
-	"github.com/jacobcase/gotail/v2/tail"
+	"github.com/jacobcase/gotail/v3/forward"
+	"github.com/jacobcase/gotail/v3/forwardtest"
+	"github.com/jacobcase/gotail/v3/tail"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────

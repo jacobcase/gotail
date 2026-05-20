@@ -1232,26 +1232,9 @@ For a v1-equivalent shape:
 
 ### Module versioning
 
-- Tag the current `main` as `v1.0.0` (or `v0.9.0` if the user prefers signaling pre-1.0). v1 enters maintenance: critical bug fixes only.
-- Begin v2 work on a `v2` branch. New module path: `github.com/jacobcase/gotail/v2` (Go module versioning convention for major versions).
-- Sub-packages: `.../v2/watch`, `.../v2/tail`, `.../v2/forward`.
-- Once v2 is stable, tag `v2.0.0` on the v2 branch. Keep `main` pointing at v2.
-
-### Compat shim — *optional*, only if a user materializes
-
-If a v1 user materializes and complains, ship `github.com/jacobcase/gotail/v2/compat` that re-exports v1 types backed by v2 implementations:
-
-```go
-// Package compat provides v1 API compatibility on top of v2.
-// New code should not use this package.
-package compat
-
-type Config = struct { /* old shape */ }
-type Watcher = struct { /* delegates to watch.Watcher */ }
-// ... etc
-```
-
-Don't ship this preemptively.
+- The module path carries the major version: `github.com/jacobcase/gotail/v3`.
+- Sub-packages: `.../v3/watch`, `.../v3/tail`, `.../v3/forward`.
+- A new major version — and the corresponding `/vN` path bump — is cut only for a backward-incompatible change to an exported identifier (verified with `apidiff` against the latest released tag). Additive changes ship as a minor release; bug fixes as a patch.
 
 ---
 
@@ -1261,7 +1244,7 @@ All decisions below are locked in before implementation begins.
 
 | # | Question | Decision | Rationale |
 |---|---|---|---|
-| 1 | Module name: `github.com/jacobcase/gotail/v2` (vN suffix) or new repo? | `gotail/v2` | Standard Go module-versioning idiom; preserves history. |
+| 1 | Module name: `github.com/jacobcase/gotail/vN` (vN suffix) or new repo? | `gotail/vN` suffix | Standard Go module-versioning idiom; preserves history. |
 | 2 | Min Go version | **Go 1.26 or later** | User-specified. Comfortably above the 1.23 floor needed for `iter.Seq2`; gives access to all current stdlib improvements. |
 | 3 | fsnotify: vendor it via build tag, or build our own? | Build tag in fsnotify. Default off. | Re-implementing risks reproducing platform bugs fsnotify already fixed. Build tag preserves zero-deps default. |
 | 4 | Drop `golang.org/x/sys`? | Yes as a direct dependency. Stdlib `syscall` is sufficient on every platform we target; v1's dual-switch is dead code. `x/sys` remains in `go.mod` as an indirect dep pulled by `fsnotify`; the `gotail_nofsnotify` build tag drops it entirely. | Direct-dep-clean is the goal; transitive pulls inherited from a vetted upstream are acceptable. |

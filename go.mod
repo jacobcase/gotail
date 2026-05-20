@@ -1,4 +1,4 @@
-module github.com/jacobcase/gotail/v2
+module github.com/jacobcase/gotail/v3
 
 go 1.26
 

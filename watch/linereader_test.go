@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 func newLR(t *testing.T, w watch.Watcher, opts watch.LineOptions) *watch.LineReader {

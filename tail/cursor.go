@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/internal/atomicwrite"
+	"github.com/jacobcase/gotail/v3/internal/atomicwrite"
 )
 
 // cursorVersion is the schema version this build writes and the only version

@@ -3,7 +3,7 @@ package tail
 import (
 	"errors"
 
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 var (

@@ -21,7 +21,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jacobcase/gotail/v2/tail"
+	"github.com/jacobcase/gotail/v3/tail"
 )
 
 func main() {

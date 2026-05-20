@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jacobcase/gotail/v2/internal/atomicwrite"
+	"github.com/jacobcase/gotail/v3/internal/atomicwrite"
 )
 
 // TestWrite_RejectsSymlinkAtTmp: Write must not follow a pre-positioned

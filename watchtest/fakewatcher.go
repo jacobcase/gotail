@@ -10,7 +10,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 type fakeWatcher struct {

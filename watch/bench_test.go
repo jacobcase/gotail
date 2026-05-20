@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcase/gotail/v2/watch"
+	"github.com/jacobcase/gotail/v3/watch"
 )
 
 // BenchmarkLineReader_NoAlloc asserts the steady-state read+frame hot path is

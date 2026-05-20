@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacobcase/gotail/v2/tail"
+	"github.com/jacobcase/gotail/v3/tail"
 )
 
 func testFlockConflict(t *testing.T) {

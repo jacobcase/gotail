@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jacobcase/gotail/v2/tail"
-	"github.com/jacobcase/gotail/v2/tailtest"
+	"github.com/jacobcase/gotail/v3/tail"
+	"github.com/jacobcase/gotail/v3/tailtest"
 )
 
 func TestMemorySource_AddEnumerate(t *testing.T) {
