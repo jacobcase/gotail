@@ -604,7 +604,7 @@ This makes "fsnotify just works" the default while preserving an escape hatch fo
 - fsnotify on macOS via FSEvents has coarser granularity than inotify — events are coalesced. Latency is fine for tailing but not for sub-millisecond accuracy.
 - fsnotify cannot watch a file that doesn't exist yet. We need to watch the *parent directory* and react to creates. Already what the fsnotify package does, but worth noting.
 
-**Hybrid mode (recommended for v2.1):** fsnotify watches the parent directory for create/rename events; the active file is read until EOF on each notification; a 10s poll is a backstop for missed events. This is what `tail -F` does on modern systems. Out of scope for v2.0 to keep the surface small; design the API so it can be added without breaking changes (a `WatchMode` enum: `Poll | Fsnotify | Hybrid`).
+**Hybrid mode (not yet implemented):** fsnotify watches the parent directory for create/rename events; the active file is read until EOF on each notification; a 10s poll is a backstop for missed events. This is what `tail -F` does on modern systems. Kept out of the current surface to stay small; the API is designed so it can be added without breaking changes (a `WatchMode` enum: `Poll | Fsnotify | Hybrid`).
 
 ### 5.2 Platform support
 
@@ -1255,8 +1255,8 @@ All decisions below are locked in before implementation begins.
 | 9 | Should L2 expose `Tailer.Position()`? | Yes | Lets non-iterator users introspect without consuming a record. |
 | 10 | Should L3 own the flock or L2? | L2 | Flock protects the cursor; cursor is L2's asset. Future L2-only consumers still get protection. |
 | 11 | Should `Forwarder.Run` be re-entrant after returning? | No | One-shot. Document. Construct a new Forwarder if you want to restart. |
-| 12 | Compressed backup file support (.gz)? | Detection ships in v2.0; decompression deferred to v2.1. `Lumberjack` and `Logrotate` recognise `.gz` variants and skip them, surfacing the skipped path via `WithLumberjackSkippedHook` / `WithLogrotateSkippedHook` for observability. A checkpoint pointing at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy. | Skip-and-observe is cheap and prevents silent data omission; full decompression adds the bytes-vs-offset semantic axis and waits for v2.1. |
-| 13 | Hybrid fsnotify+poll mode? | Defer to v2.1 | Single-mode is correct; hybrid is a latency optimization. Design API to allow later addition. |
+| 12 | Compressed backup file support (.gz)? | Detect and skip; decompression not implemented. `Lumberjack` and `Logrotate` recognise `.gz` variants and skip them, surfacing the skipped path via `WithLumberjackSkippedHook` / `WithLogrotateSkippedHook` for observability. A checkpoint pointing at an aged-off `.gz` falls through to `OnMissingCheckpoint` policy. | Skip-and-observe is cheap and prevents silent data omission; full decompression adds the bytes-vs-offset semantic axis and remains future work. |
+| 13 | Hybrid fsnotify+poll mode? | Not implemented; future work | Single-mode is correct; hybrid is a latency optimization. Design API to allow later addition. |
 | 14 | Should we ship a CLI binary (`cmd/gotail`)? | Yes, small one — `tail -F` shape only, L1/L2 path. End-to-end L3 coverage lives in the `forward` package tests (incl. `httptest.Server`-backed integration tests), not in the CLI. ~50–80 LOC. |
 | 15 | Default `MissingPolicy` for `OnMissingCheckpoint`? | `FallbackOldest` | Matches driving requirement #4 (lose nothing, accept duplicates). Most graceful default for at-least-once shippers. |
 | 16 | License of v2? | Same as v1 (file `LICENSE`) | No reason to change. |
@@ -1359,7 +1359,7 @@ Suggested ordering. Each phase is independently mergeable and reviewable. Estima
 
 **Deliverable:** v2.0.0 release-ready.
 
-### Phase 8 — Out of scope for v2.0, design space for v2.1+
+### Phase 8 — Out of scope, future design space
 
 - Hybrid fsnotify+poll watcher.
 - Compressed backup file (.gz) source.
