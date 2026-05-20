@@ -167,6 +167,9 @@ func matchLumberjackCompressed(n, prefix, ext string) bool {
 		return false
 	}
 	body := n[:len(n)-len(gz)]
+	if !strings.HasPrefix(body, prefix) {
+		return false
+	}
 	if ext != "" && !strings.HasSuffix(body, ext) {
 		return false
 	}
