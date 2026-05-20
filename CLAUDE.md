@@ -1,5 +1,10 @@
 # gotail — Claude project notes
 
+## Before opening a PR
+
+Run `make check` and ensure it passes before opening or updating a PR.
+Keep it in sync with `.github/workflows/ci.yml`.
+
 ## Design plan
 
 The v2 design plan lives at `docs/design.md`. The plan is a snapshot of
