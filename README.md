@@ -1,4 +1,4 @@
-# gotail v2
+# gotail
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/jacobcase/gotail/v3.svg)](https://pkg.go.dev/github.com/jacobcase/gotail/v3)
 [![CI](https://github.com/jacobcase/gotail/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jacobcase/gotail/actions/workflows/ci.yml)
@@ -8,7 +8,7 @@ A reliable, production-grade file tailing library for Go.
 
 ## Overview
 
-gotail v2 is a layered library for tailing log files across rotation,
+gotail is a layered library for tailing log files across rotation,
 truncation, and process restarts. It is built for high-throughput log
 pipelines (edge proxy logs, application journals, audit shippers) where
 durability and correctness matter.
@@ -319,7 +319,7 @@ For all three, gotail's race-aware drain semantics preserve trailing
 bytes on the rotated-out file: when rotation is detected, the
 `LineReader` continues reading its existing fd until EOF (the kernel
 keeps the inode alive while we hold an fd) and only then opens the new
-file. This is the v1 correctness property and survives unchanged.
+file. This race-aware drain is a core correctness property.
 
 ### Avoid: `copytruncate`
 
@@ -400,7 +400,7 @@ as truncations and the reader will reset to offset 0.
 ## Project layout
 
 ```
-github.com/jacobcase/gotail/
+github.com/jacobcase/gotail/v3/
 ├── watch/        L1 — file-as-stream primitives (Watcher, LineReader, Position)
 │   ├── poll.go              Always-available polling backend
 │   ├── fsnotify_unix.go     OS-event backend (default; opt-out via build tag)
