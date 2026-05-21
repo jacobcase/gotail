@@ -1,5 +1,5 @@
 // Command gotail tails a file and writes lines to stdout, similar to `tail -f`.
-// It uses the gotail v2 watch and tail packages.
+// It uses the gotail watch and tail packages.
 //
 // Usage:
 //

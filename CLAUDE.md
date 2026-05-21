@@ -7,7 +7,7 @@ Keep it in sync with `.github/workflows/ci.yml`.
 
 ## Design plan
 
-The v2 design plan lives at `docs/design.md`. The plan is a snapshot of
+The design plan lives at `docs/design.md`. The plan is a snapshot of
 the current desired design state — it describes what the code does now,
 not its history. When a change lands that alters a documented design
 choice, edit the relevant section in place; do not keep "previously X,

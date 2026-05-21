@@ -223,7 +223,8 @@ func TestLineReader_Resume(t *testing.T) {
 	}
 }
 
-// TestLineReader_Rotate ports the v1 TestLineReaderRotate test.
+// TestLineReader_Rotate covers rotation: switch to the new file after an
+// in-place rotation, draining trailing bytes from the old fd first.
 func TestLineReader_Rotate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

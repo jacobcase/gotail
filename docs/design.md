@@ -61,7 +61,7 @@ This shape covers log forwarders (Vector / Fluent Bit / Promtail-style), event-t
 | 7 | Backfill an archived/standalone file end-to-end | `tail.SingleFile(path)` source + `Options.StopAtEOF: true` + L3 forwarder. `Tailer.Done() <-chan struct{}` signals stream exhaustion | L2+L3 |
 | ext | Modern Go (slog, ctx, generics, iter) | Go 1.26+, slog throughout, ctx on every blocking call, generics on L3, `iter.Seq2` for `Records()` | All |
 | ext | Sentinel errors via `errors.Is/As` | `ErrCheckpointMissing`, `ErrInodeMismatch`, `ErrSourceExhausted`, `ErrLockHeld`, `ErrLineTooLong`, `ErrPermanent` | All |
-| ext | Three packages not three structs | `github.com/jacobcase/gotail/watch`, `.../tail`, `.../forward` | All |
+| ext | Three packages not three structs | `github.com/jacobcase/gotail/v3/watch`, `.../tail`, `.../forward` | All |
 | ext | Hooks not concrete metrics | `OnBatchSent`, `OnSendError`, `OnCommitted`, `OnDecodeError`, `OnDropped`, `OnError`, `OnCheckpoint` callback fields. No prom/otel deps | L2/L3 |
 | ext | Memory-backed adapters for tests | `tail.NewMemoryCursor()`, `tail.StaticSource()`, `tailtest.MemorySource{}`, `watchtest.FakeWatcher()`, `forwardtest.RecordingSink[T]` / `FailingSink[T]` | All |
 | ext | Iterator form | `Tailer.Records(ctx) iter.Seq2[Record, error]` | L2 |
@@ -255,7 +255,7 @@ import (
     "log/slog"
     "time"
 
-    "github.com/jacobcase/gotail/watch"
+    "github.com/jacobcase/gotail/v3/watch"
 )
 
 // Re-export Position so L2 callers don't need to import watch.
@@ -413,7 +413,7 @@ import (
     "log/slog"
     "time"
 
-    "github.com/jacobcase/gotail/tail"
+    "github.com/jacobcase/gotail/v3/tail"
 )
 
 type Position = tail.Position
@@ -783,8 +783,8 @@ forward.New(forward.Options[[]byte]{
       continue read loop
   ```
 - `OnTruncated` fires from two sites, by design: the watcher event loop catches the common case, and `LineReader.Next` catches copytruncate races the watcher missed (the `fi.Size() < l.pos.Offset` block — small windows where a truncation lands between watcher ticks and the LineReader is mid-refill). Hook authors must handle both invocation paths idempotently.
-- copytruncate detection requires per-tick stat of the *open fd* (not just the path). `pollWatcher.Wait` already does this (`poll_watcher.go:106`). The only change: handle `Size < Position` by truncating instead of declaring an error.
-- Inode reuse + small-file edge case: if the new file is opened via the `rename+create` path but happens to inherit the same inode the old file had (rare but possible after long uptime), the existing `SeekIfMatches` would happily seek into it. Mitigation: when crossing rotation, *always* start the new file at offset 0 regardless of `StartState`. This is already implicit in `pollWatcher.Wait` — it only consults `StartState` on the very first open (`poll_watcher.go:165`).
+- copytruncate detection requires per-tick stat of the *open fd* (not just the path). `pollWatcher.Wait` (`watch/poll.go`) does this, handling `size < position` by truncating instead of declaring an error.
+- Inode reuse + small-file edge case: if the new file is opened via the `rename+create` path but happens to inherit the same inode the old file had (rare but possible after long uptime), a resume-time inode check would otherwise seek into it. Mitigation: when crossing rotation, *always* start the new file at offset 0 regardless of any `Resume` point. This is how `pollWatcher.Wait` (`watch/poll.go`) behaves — it consults the `Resume` position only on the very first open.
 
 **Open fd rotation hardening:** the old fd is closed as soon as rotation is confirmed — holding stale fds open delays the kernel reclaiming the disk space (the unlinked file can't be freed until all fds close). For multi-file `Source`s the lifecycle is per-file: each file gets its own open/read/close cycle.
 
